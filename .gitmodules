@@ -1,0 +1,6 @@
+[submodule "GaussianAvatars/submodules/diff-gaussian-rasterization"]
+	path = GaussianAvatars/submodules/diff-gaussian-rasterization
+	url = https://github.com/graphdeco-inria/diff-gaussian-rasterization.git
+[submodule "GaussianAvatars/submodules/simple-knn"]
+	path = GaussianAvatars/submodules/simple-knn
+	url = https://gitlab.inria.fr/bkerbl/simple-knn
