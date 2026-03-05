@@ -58,12 +58,15 @@ class GaussianModel:
         self._opacity = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
+        self.xyz_gradient_accum_abs = torch.empty(0)  
         self.denom = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
         self.coord = coord
+        self.use_sparse_adam = False 
+        self.tmp_radii = None  
 
         # Toyota Motor Europe NV/SA and its affiliated companies retain all intellectual property and proprietary rights in and to the following code lines and related documentation. Any commercial use, reproduction, disclosure or distribution of these code lines and related documentation without an express license agreement from Toyota Motor Europe NV/SA is strictly prohibited.
         # for binding GaussianModel to a mesh
@@ -193,6 +196,14 @@ class GaussianModel:
         features_dc = self._features_dc
         features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
+
+    @property
+    def get_features_dc(self):
+        return self._features_dc
+
+    @property
+    def get_features_rest(self):
+        return self._features_rest
     
     @property
     def get_opacity(self):
@@ -277,15 +288,18 @@ class GaussianModel:
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        ####
+
+        # Check if SparseGaussianAdam should be used (FastGS)
+        self.use_sparse_adam = getattr(training_args, 'use_sparse_adam', False)
+
         l = []
         if (training_args.disable_gaussian_splats):
             l = [
                 {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"}
             ]
         else:
-            # print("ok juff")
             l = [
                 {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
                 {'params': [self.normal_offset], 'lr': training_args.normal_position_lr, "name": "normal_offset"},
@@ -296,7 +310,40 @@ class GaussianModel:
                 {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
             ]
 
-        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        if self.use_sparse_adam:
+            try:
+                from diff_gaussian_rasterization_fastgs import SparseGaussianAdam
+                self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+                _orig_step = self.optimizer.step
+                @torch.no_grad()
+                def _safe_step(visibility, N):
+                    for group in self.optimizer.param_groups:
+                        param = group["params"][0]
+                        if param.numel() == 0:
+                            continue
+                        if param.grad is None:
+                            continue
+                        lr = group["lr"]
+                        eps = group["eps"]
+                        state = self.optimizer.state[param]
+                        if len(state) == 0:
+                            state['step'] = torch.tensor(0.0, dtype=torch.float32)
+                            state['exp_avg'] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                            state['exp_avg_sq'] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                        exp_avg = state["exp_avg"]
+                        exp_avg_sq = state["exp_avg_sq"]
+                        M = param.numel() // N
+                        from diff_gaussian_rasterization_fastgs import _C
+                        _C.adamUpdate(param, param.grad, exp_avg, exp_avg_sq, visibility, lr, 0.9, 0.999, eps, N, M)
+                self.optimizer.step = _safe_step
+                print("[FastGS] Using SparseGaussianAdam (CUDA-accelerated sparse optimizer)")
+            except ImportError:
+                print("[WARNING] SparseGaussianAdam not available, falling back to standard Adam")
+                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+                self.use_sparse_adam = False
+        else:
+            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
@@ -657,9 +704,12 @@ class GaussianModel:
         self.normal_offset = optimizable_tensors["normal_offset"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        self.xyz_gradient_accum_abs = self.xyz_gradient_accum_abs[valid_points_mask]  # FastGS
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        if self.tmp_radii is not None:
+            self.tmp_radii = self.tmp_radii[valid_points_mask]
 
         if self.binding is not None:
             # Toyota Motor Europe NV/SA and its affiliated companies retain all intellectual property and proprietary rights in and to the following code lines and related documentation. Any commercial use, reproduction, disclosure or distribution of these code lines and related documentation without an express license agreement from Toyota Motor Europe NV/SA is strictly prohibited.
@@ -712,6 +762,7 @@ class GaussianModel:
         self.normal_offset = optimizable_tensors["normal_offset"]
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")  # FastGS
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
@@ -806,6 +857,136 @@ class GaussianModel:
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        # print("debug viewspace_point_tensor",  viewspace_point_tensor.grad)
+        # Standard gradient accum (first 2 dims = position gradients)
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        # FastGS: absolute gradient accum (dims 2:4 when using FastGS 4-dim screenspace points)
+        if viewspace_point_tensor.grad.shape[-1] >= 4:
+            self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, 2:], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    # ==================== FastGS Densification Methods ====================
+
+    def densify_and_split_fastgs(self, metric_mask, filter, N=2):
+        """FastGS multi-view consistent split: split Gaussians flagged by both
+        gradient and multi-view metric criteria."""
+        n_init_points = self.get_xyz.shape[0]
+
+        selected_pts_mask = torch.zeros((n_init_points), dtype=bool, device="cuda")
+        mask = torch.logical_and(metric_mask, filter)
+        selected_pts_mask[:mask.shape[0]] = mask
+
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+        means = torch.zeros((stds.size(0), 3), device="cuda")
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self._xyz[selected_pts_mask].repeat(N, 1)
+
+        if self.binding is not None:
+            selected_scaling = self.get_scaling[selected_pts_mask]
+            face_scaling = self.face_scaling[self.binding[selected_pts_mask]]
+            new_scaling = self.scaling_inverse_activation((selected_scaling / face_scaling).repeat(N, 1) / (0.8 * N))
+        else:
+            new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N))
+
+        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
+        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
+        new_normal_offset = self.normal_offset[selected_pts_mask].repeat(N)
+
+        if self.binding is not None:
+            new_binding = self.binding[selected_pts_mask].repeat(N)
+            self.binding = torch.cat((self.binding, new_binding))
+            self.binding_counter.scatter_add_(0, new_binding, torch.ones_like(new_binding, dtype=torch.int32, device="cuda"))
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_normal_offset)
+
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        self.prune_points(prune_filter)
+
+    def densify_and_clone_fastgs(self, metric_mask, filter):
+        """FastGS multi-view consistent clone: clone Gaussians flagged by both
+        gradient and multi-view metric criteria."""
+        selected_pts_mask = torch.logical_and(metric_mask, filter)
+
+        new_xyz = self._xyz[selected_pts_mask]
+        new_features_dc = self._features_dc[selected_pts_mask]
+        new_features_rest = self._features_rest[selected_pts_mask]
+        new_opacities = self._opacity[selected_pts_mask]
+        new_scaling = self._scaling[selected_pts_mask]
+        new_rotation = self._rotation[selected_pts_mask]
+        new_normal_offset = self.normal_offset[selected_pts_mask]
+
+        if self.binding is not None:
+            new_binding = self.binding[selected_pts_mask].to(dtype=torch.int64)
+            self.binding = torch.cat((self.binding, new_binding))
+            self.binding_counter.scatter_add_(0, new_binding, torch.ones_like(new_binding, dtype=torch.int32, device="cuda"))
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_normal_offset)
+
+    def densify_and_prune_fastgs(self, max_screen_size, min_opacity, extent, radii, args, importance_score=None, pruning_score=None):
+        """FastGS multi-view consistent densification and pruning.
+        
+        1. Gradient-qualified candidates are filtered by multi-view importance score.
+        2. Qualified small Gaussians are cloned; qualified large ones are split.
+        3. Low-opacity / too-large Gaussians are pruned (budget-weighted by consistency score).
+        """
+        grad_vars = self.xyz_gradient_accum / self.denom
+        grad_vars[grad_vars.isnan()] = 0.0
+        self.tmp_radii = radii
+
+        grads_abs = self.xyz_gradient_accum_abs / self.denom
+        grads_abs[grads_abs.isnan()] = 0.0
+
+        grad_thresh = getattr(args, 'grad_thresh', args.densify_grad_threshold)
+        grad_abs_thresh = getattr(args, 'grad_abs_thresh', args.densify_grad_threshold)
+        dense = getattr(args, 'dense', args.percent_dense)
+
+        grad_qualifiers = torch.where(torch.norm(grad_vars, dim=-1) >= grad_thresh, True, False)
+        grad_qualifiers_abs = torch.where(torch.norm(grads_abs, dim=-1) >= grad_abs_thresh, True, False)
+        clone_qualifiers = torch.max(self.get_scaling, dim=1).values <= dense * extent
+        split_qualifiers = torch.max(self.get_scaling, dim=1).values > dense * extent
+
+        all_clones = torch.logical_and(clone_qualifiers, grad_qualifiers)
+        all_splits = torch.logical_and(split_qualifiers, grad_qualifiers_abs)
+
+        # Multi-view consistent metric filter
+        metric_mask = importance_score > 5
+
+        self.densify_and_clone_fastgs(metric_mask, all_clones)
+        self.densify_and_split_fastgs(metric_mask, all_splits)
+
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+
+        scores = 1 - pruning_score
+        to_remove = torch.sum(prune_mask)
+        remove_budget = int(0.5 * to_remove)
+
+        if remove_budget:
+            n_init_points = self.get_xyz.shape[0]
+            padded_importance = torch.zeros((n_init_points), dtype=torch.float32)
+            padded_importance[:scores.shape[0]] = 1 / (1e-6 + scores.squeeze())
+            selected_pts_mask = torch.zeros_like(padded_importance, dtype=bool, device="cuda")
+            sampled_indices = torch.multinomial(padded_importance, remove_budget, replacement=False)
+            selected_pts_mask[sampled_indices] = True
+            final_prune = torch.logical_and(prune_mask, selected_pts_mask)
+            self.prune_points(final_prune)
+
+        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * 0.8))
+        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        self._opacity = optimizable_tensors["opacity"]
+        self.tmp_radii = None
+
+        torch.cuda.empty_cache()
+
+    def final_prune_fastgs(self, min_opacity, pruning_score=None):
+        """FastGS final-stage pruning: remove Gaussians with low opacity or
+        poor multi-view reconstruction consistency."""
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        scores_mask = pruning_score > 0.9
+        final_prune = torch.logical_or(prune_mask, scores_mask)
+        self.prune_points(final_prune)

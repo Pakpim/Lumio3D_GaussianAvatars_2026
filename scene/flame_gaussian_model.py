@@ -203,6 +203,7 @@ class FlameGaussianModel(GaussianModel):
     
     def training_setup(self, training_args):
         super().training_setup(training_args)
+        self.flame_optimizer = None
 
         if training_args.train_texture:
             self.flame_model._tex_painted.requires_grad = True
@@ -212,11 +213,6 @@ class FlameGaussianModel(GaussianModel):
 
         if self.not_finetune_flame_params:
             return
-
-        # # shape
-        # self.flame_param['shape'].requires_grad = True
-        # param_shape = {'params': [self.flame_param['shape']], 'lr': 1e-5, "name": "shape"}
-        # self.optimizer.add_param_group(param_shape)
 
         # pose
         self.flame_param['rotation'].requires_grad = True
@@ -230,27 +226,27 @@ class FlameGaussianModel(GaussianModel):
             self.flame_param['eyes_pose'],
         ]
         param_pose = {'params': params, 'lr': training_args.flame_pose_lr, "name": "pose"}
-        self.optimizer.add_param_group(param_pose)
 
         # translation
         self.flame_param['translation'].requires_grad = True
         param_trans = {'params': [self.flame_param['translation']], 'lr': training_args.flame_trans_lr, "name": "trans"}
-        self.optimizer.add_param_group(param_trans)
         
         # expression
         self.flame_param['expr'].requires_grad = True
         param_expr = {'params': [self.flame_param['expr']], 'lr': training_args.flame_expr_lr, "name": "expr"}
-        self.optimizer.add_param_group(param_expr)
 
-        # # static_offset
-        # self.flame_param['static_offset'].requires_grad = True
-        # param_static_offset = {'params': [self.flame_param['static_offset']], 'lr': 1e-6, "name": "static_offset"}
-        # self.optimizer.add_param_group(param_static_offset)
+        flame_param_groups = [param_pose, param_trans, param_expr]
 
-        # # dynamic_offset
-        # self.flame_param['dynamic_offset'].requires_grad = True
-        # param_dynamic_offset = {'params': [self.flame_param['dynamic_offset']], 'lr': 1.6e-6, "name": "dynamic_offset"}
-        # self.optimizer.add_param_group(param_dynamic_offset)
+        if self.use_sparse_adam:
+            # SparseGaussianAdam only works with per-Gaussian params.
+            # FLAME params need a separate standard Adam optimizer.
+            self.flame_optimizer = torch.optim.Adam(flame_param_groups, lr=0.0, eps=1e-15)
+            print("[FastGS] Created separate Adam optimizer for FLAME parameters")
+        else:
+            # Standard Adam: safe to add FLAME params to the same optimizer
+            for pg in flame_param_groups:
+                self.optimizer.add_param_group(pg)
+            self.flame_optimizer = None
 
     def save_ply(self, path, opt):
         super().save_ply(path,opt)

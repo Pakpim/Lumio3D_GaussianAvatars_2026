@@ -19,12 +19,16 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, network_gui
+from gaussian_renderer import render, network_gui, FASTGS_AVAILABLE
 from mesh_renderer import NVDiffRenderer
 import sys
 from scene import Scene, GaussianModel, FlameGaussianModel
 
 from utils.general_utils import safe_state,save_config
+
+from utils.fast_utils import sampling_cameras, compute_gaussian_score_fastgs, FUSED_SSIM_AVAILABLE
+if FUSED_SSIM_AVAILABLE:
+    from fused_ssim import fused_ssim as fast_ssim
 
 import uuid
 from tqdm import tqdm
@@ -65,6 +69,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    use_fastgs = opt.use_fastgs and FASTGS_AVAILABLE
+    use_fused_ssim = opt.use_fused_ssim and FUSED_SSIM_AVAILABLE
+    fastgs_mult = opt.fastgs_mult
+    if use_fastgs:
+        print("[FastGS] Accelerated rasterizer ENABLED (mult={})".format(fastgs_mult))
+    else:
+        print("[INFO] Using vanilla rasterizer")
+    if use_fused_ssim:
+        print("[FastGS] Fused SSIM ENABLED")
+
     # bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     ####
     bg_color = [0, 0, 0] if dataset.white_background else [0, 0, 0]
@@ -152,7 +167,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background, backface_culling=opt.bcull)
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background,
+                            backface_culling=opt.bcull,
+                            use_fastgs=use_fastgs, mult=fastgs_mult)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         ####
         
@@ -193,7 +210,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         losses = {}
         losses['l1'] = l1_loss(image, gt_image) * (1.0 - opt.lambda_dssim)
-        losses['ssim'] = (1.0 - ssim(image, gt_image)) * opt.lambda_dssim
+        # FastGS: use fused SSIM when available for ~3x speedup
+        if use_fused_ssim:
+            ssim_val = fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+            losses['ssim'] = (1.0 - ssim_val) * opt.lambda_dssim
+        else:
+            losses['ssim'] = (1.0 - ssim(image, gt_image)) * opt.lambda_dssim
 
 
         if opt.train_texture and iteration >= opt.texture_start_iter:
@@ -281,18 +303,53 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
 
-                    # LM3D : adjust opacity threshold
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.001, scene.cameras_extent, size_threshold)
+                    if opt.fastgs_densify:
+                        # FastGS: multi-view consistent densification
+                        my_viewpoint_stack = [scene.getTrainCameras(scale=dataset.scale_res)[i] for i in range(len(scene.getTrainCameras(scale=dataset.scale_res)))]
+                        camlist = sampling_cameras(my_viewpoint_stack)
+                        importance_score, pruning_score = compute_gaussian_score_fastgs(
+                            camlist, gaussians, pipe, background, opt,
+                            use_fastgs=use_fastgs, mult=fastgs_mult, DENSIFY=True)
+                        gaussians.densify_and_prune_fastgs(
+                            max_screen_size=size_threshold,
+                            min_opacity=0.005,
+                            extent=scene.cameras_extent,
+                            radii=radii,
+                            args=opt,
+                            importance_score=importance_score,
+                            pruning_score=pruning_score)
+                    else:
+                        # Original densification
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.001, scene.cameras_extent, size_threshold)
 
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
                     ###
 
+            if opt.fastgs_prune and iteration % opt.fastgs_prune_interval == 0 \
+                    and iteration > opt.fastgs_prune_start and iteration < opt.fastgs_prune_end:
+                my_viewpoint_stack = [scene.getTrainCameras(scale=dataset.scale_res)[i] for i in range(len(scene.getTrainCameras(scale=dataset.scale_res)))]
+                camlist = sampling_cameras(my_viewpoint_stack)
+                _, pruning_score = compute_gaussian_score_fastgs(
+                    camlist, gaussians, pipe, background, opt,
+                    use_fastgs=use_fastgs, mult=fastgs_mult)
+                gaussians.final_prune_fastgs(min_opacity=0.1, pruning_score=pruning_score)
+                print(f"\n[ITER {iteration}] FastGS final prune -> {gaussians.get_xyz.shape[0]} Gaussians")
+
             # Optimizer step
             if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
+                if gaussians.use_sparse_adam and use_fastgs:
+                    visible = radii > 0
+                    gaussians.optimizer.step(visible, radii.shape[0])
+                    gaussians.optimizer.zero_grad(set_to_none=True)
+                else:
+                    gaussians.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none=True)
+
+                if hasattr(gaussians, 'flame_optimizer') and gaussians.flame_optimizer is not None:
+                    gaussians.flame_optimizer.step()
+                    gaussians.flame_optimizer.zero_grad(set_to_none=True)
 
             gaussians.clamp_scaling(max_scaling=opt.max_scaling)  # LM3D : clamp scaling to 0.5
 

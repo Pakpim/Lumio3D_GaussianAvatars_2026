@@ -149,6 +149,18 @@ class OptimizationParams(ParamGroup):
         self.depth = True
         self.max_scaling = 0.5  # LM3D : clamp scaling to 0.5
 
+        self.use_fastgs = False           
+        self.use_fused_ssim = False       
+        self.use_sparse_adam = False  
+        self.fastgs_mult = 0.5      
+        self.fastgs_densify = False   
+        self.fastgs_prune = False 
+        self.fastgs_prune_interval = 3000     
+        self.fastgs_prune_end = 30000           
+        self.grad_thresh = 0.0002        
+        self.grad_abs_thresh = 0.0002   
+        self.dense = 0.01               
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
