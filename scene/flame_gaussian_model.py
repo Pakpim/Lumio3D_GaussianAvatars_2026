@@ -77,11 +77,15 @@ class FlameGaussianModel(GaussianModel):
             num_verts = self.flame_model.v_template.shape[0]
 
             if not self.disable_flame_static_offset and 'static_offset' in meshes[0]:
-                static_offset = torch.from_numpy(meshes[0]['static_offset'])
+                static_offset = torch.from_numpy(meshes[0]['static_offset']).squeeze()
+                if static_offset.ndim == 3:
+                    static_offset = static_offset[0]
                 if static_offset.shape[0] != num_verts:
-                    static_offset = torch.nn.functional.pad(static_offset, (0, 0, 0, num_verts - meshes[0]['static_offset'].shape[0]))
+                    static_offset = static_offset[:num_verts]
             else:
-                static_offset = torch.zeros([num_verts, 3])
+                static_offset = None
+
+            has_dynamic_offset = 'dynamic_offset' in meshes[0]
 
             T = self.num_timesteps
 
@@ -94,7 +98,7 @@ class FlameGaussianModel(GaussianModel):
                 'eyes_pose': torch.zeros([T, 6]),
                 'translation': torch.zeros([T, 3]),
                 'static_offset': static_offset,
-                'dynamic_offset': torch.zeros([T, num_verts, 3]),
+                'dynamic_offset': torch.zeros([T, num_verts, 3]) if has_dynamic_offset else None,
             }
 
             for i, mesh in pose_meshes.items():
@@ -104,12 +108,17 @@ class FlameGaussianModel(GaussianModel):
                 self.flame_param['jaw_pose'][i] = torch.from_numpy(mesh['jaw_pose'])
                 self.flame_param['eyes_pose'][i] = torch.from_numpy(mesh['eyes_pose'])
                 self.flame_param['translation'][i] = torch.from_numpy(mesh['translation'])
-                # self.flame_param['dynamic_offset'][i] = torch.from_numpy(mesh['dynamic_offset'])
+                if has_dynamic_offset and 'dynamic_offset' in mesh:
+                    dyn = torch.from_numpy(mesh['dynamic_offset']).squeeze()
+                    if dyn.ndim == 3:
+                        dyn = dyn[0]
+                    self.flame_param['dynamic_offset'][i] = dyn[:num_verts]
             
             for k, v in self.flame_param.items():
-                self.flame_param[k] = v.float().cuda()
+                if v is not None:
+                    self.flame_param[k] = v.float().cuda()
             
-            self.flame_param_orig = {k: v.clone() for k, v in self.flame_param.items()}
+            self.flame_param_orig = {k: v.clone() if v is not None else None for k, v in self.flame_param.items()}
         else:
             # NOTE: not sure when this happens
             import ipdb; ipdb.set_trace()
@@ -159,7 +168,7 @@ class FlameGaussianModel(GaussianModel):
             return_landmarks=False,
             return_verts_cano=True,
             static_offset=flame_param['static_offset'],
-            dynamic_offset=flame_param['dynamic_offset'][[timestep]],
+            dynamic_offset=flame_param['dynamic_offset'][[timestep]] if flame_param['dynamic_offset'] is not None else None,
         )
         self.update_mesh_properties(verts, verts_cano)
     
@@ -252,7 +261,7 @@ class FlameGaussianModel(GaussianModel):
         super().save_ply(path,opt)
 
         npz_path = Path(path).parent / "flame_param.npz"
-        flame_param = {k: v.cpu().numpy() for k, v in self.flame_param.items()}
+        flame_param = {k: v.cpu().numpy() for k, v in self.flame_param.items() if v is not None}
         np.savez(str(npz_path), **flame_param)
         if opt.with_texture:
             tex_path = Path(path).parent / "flame_texture.png"

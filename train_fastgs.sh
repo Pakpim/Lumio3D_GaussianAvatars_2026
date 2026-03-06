@@ -1,33 +1,6 @@
 #!/bin/bash
 
-DATASET_PATH=${1:?"Usage: $0 <dataset_path> [output_path]"}
-OUTPUT_PATH=${2:-"./output/fastgs_$(basename $DATASET_PATH)"}
+DATASET_PATH=${1:-"/rpool/data/icy/dataset/bird_v01"}
+OUTPUT_PATH=${2:-"./output/fastgs_$(basename $DATASET_PATH)_$(date +"%s")"}
 
-python train.py \
-    --source_path "$DATASET_PATH" \
-    --model_path "$OUTPUT_PATH" \
-    --bind_to_mesh \
-    --iterations 30000 \
-    --sh_degree 0 \
-    --scale_res 0.25 \
-    --use_fastgs \
-    --use_fused_ssim \
-    --use_sparse_adam \
-    --fastgs_densify \
-    --fastgs_prune \
-    --fastgs_mult 0.5 \
-    --loss_thresh 0.5 \
-    --grad_thresh 0.0002 \
-    --grad_abs_thresh 0.0002 \
-    --densify_from_iter 5000 \
-    --densify_until_iter 15000 \
-    --densification_interval 200 \
-    --opacity_reset_interval 5000 \
-    --fastgs_prune_start 15000 \
-    --fastgs_prune_end 30000 \
-    --fastgs_prune_interval 3000 \
-    --lambda_dssim 0.5 \
-    --lambda_filter 10 \
-    --bcull \
-    --depth \
-    --interval 5000
+python train.py --source_path "$DATASET_PATH" --model_path "$OUTPUT_PATH"
