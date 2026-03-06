@@ -76,10 +76,10 @@ class FlameGaussianModel(GaussianModel):
             self.num_timesteps = max(pose_meshes) + 1  # required by viewers
             num_verts = self.flame_model.v_template.shape[0]
 
-            if not self.disable_flame_static_offset:
+            if not self.disable_flame_static_offset and 'static_offset' in meshes[0]:
                 static_offset = torch.from_numpy(meshes[0]['static_offset'])
                 if static_offset.shape[0] != num_verts:
-                    static_offset = torch.nn.functional.pad(static_offset, (0, 0, 0, num_verts - meshes[0]['static_offset'].shape[1]))
+                    static_offset = torch.nn.functional.pad(static_offset, (0, 0, 0, num_verts - meshes[0]['static_offset'].shape[0]))
             else:
                 static_offset = torch.zeros([num_verts, 3])
 

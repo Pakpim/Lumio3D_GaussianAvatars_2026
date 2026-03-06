@@ -155,8 +155,10 @@ class OptimizationParams(ParamGroup):
         self.fastgs_mult = 0.5      
         self.fastgs_densify = False   
         self.fastgs_prune = False 
-        self.fastgs_prune_interval = 3000     
+        self.fastgs_prune_interval = 3000
+        self.fastgs_prune_start = 15000
         self.fastgs_prune_end = 30000           
+        self.loss_thresh = 0.5
         self.grad_thresh = 0.0002        
         self.grad_abs_thresh = 0.0002   
         self.dense = 0.01               
