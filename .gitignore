@@ -2,11 +2,14 @@
 .vscode
 output
 build
-diff_rasterization/diff_rast.egg-info
-diff_rasterization/dist
+submodules/*/build/
+submodules/*/dist/
+submodules/*/*.egg-info/
 tensorboard_3d
 screenshots
 job/
+wandb/
+*.ply
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
