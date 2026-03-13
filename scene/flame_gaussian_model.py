@@ -20,7 +20,7 @@ from PIL import Image
 
 
 class FlameGaussianModel(GaussianModel):
-    def __init__(self, sh_degree : int, coord, opt = None, disable_flame_static_offset=False, not_finetune_flame_params=False, painted_tex_path="", n_shape=300, n_expr=100):
+    def __init__(self, sh_degree : int, coord, opt = None, disable_flame_static_offset=False, disable_mouth_interior=False, not_finetune_flame_params=False, painted_tex_path="", n_shape=300, n_expr=100):
         super().__init__(sh_degree, coord)
 
         self.disable_flame_static_offset = disable_flame_static_offset
@@ -34,12 +34,14 @@ class FlameGaussianModel(GaussianModel):
                 n_shape,
                 n_expr,
                 add_teeth=True,
+                add_mouth_interior=not disable_mouth_interior,
             ).cuda()
         else:
             self.flame_model = FlameHead(
                 n_shape,
                 n_expr,
                 add_teeth=True,
+                add_mouth_interior=not disable_mouth_interior,
                 painted_tex_path=painted_tex_path,
             ).cuda()
             

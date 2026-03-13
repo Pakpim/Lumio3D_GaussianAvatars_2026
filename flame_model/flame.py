@@ -95,6 +95,7 @@ class FlameHead(nn.Module):
         painted_tex_path=FLAME_PAINTED_TEX_PATH,
         include_mask=True,
         add_teeth=True,
+        add_mouth_interior=True,
     ):
         super().__init__()
 
@@ -207,9 +208,9 @@ class FlameHead(nn.Module):
             )
 
         if add_teeth:
-            self.add_teeth()
+            self.add_teeth(add_mouth_interior=add_mouth_interior)
         
-    def add_teeth(self):
+    def add_teeth(self, add_mouth_interior=True):
         # get reference vertices from lips
         vid_lip_outside_ring_upper = self.mask.get_vid_by_region(['lip_outside_ring_upper'], keep_order=True)
 
@@ -507,6 +508,63 @@ class FlameHead(nn.Module):
         self.textures_idx = torch.cat([self.textures_idx, f_teeth_upper+num_verts_uv_orig, f_teeth_lower+num_verts_uv_orig], dim=0)
 
         self.mask.update(self.faces, self.textures_idx)
+
+        if add_mouth_interior:
+            num_teeth = vid_teeth_upper_root.shape[0]
+            num_verts_orig = self.v_template.shape[0]  # updated after adding teeth
+            teeth_vid_start = num_verts_orig - num_verts_teeth
+
+            mouth_buff1 = v_teeth_upper_root.clone()
+            mouth_buff1[:, 2] -= thickness * 5
+            mouth_buff2 = v_teeth_lower_root.clone()
+            mouth_buff2[:, 2] -= thickness * 5
+
+            v_mouth_upper_back = (mouth_buff1 + mouth_buff2) * 0.5
+            v_mouth_lower_back = (mouth_buff1 + mouth_buff2) * 0.5
+            v_mouth_interior = torch.cat([v_mouth_upper_back, v_mouth_lower_back], dim=0)
+            num_verts_mouth_interior = v_mouth_interior.shape[0]
+
+            self.v_template = torch.cat([self.v_template, v_mouth_interior], dim=0)
+
+            vid_mouth_interior_upper = torch.arange(0, num_teeth) + num_verts_orig
+            vid_mouth_interior_lower = torch.arange(num_teeth, num_teeth * 2) + num_verts_orig
+            vid_mouth_interior = torch.cat([vid_mouth_interior_upper, vid_mouth_interior_lower], dim=0)
+            self.mask.v.register_buffer("mouth_interior", vid_mouth_interior)
+
+            # Extend FLAME buffers for the interior mouth vertices.
+            self.shapedirs = torch.cat([self.shapedirs, torch.zeros_like(self.shapedirs[:num_verts_mouth_interior])], dim=0)
+            shape_dirs_mean = (self.shapedirs[vid_lip_outside_ring_upper, :, :self.n_shape_params] + self.shapedirs[vid_lip_outside_ring_lower, :, :self.n_shape_params]) / 2
+            self.shapedirs[vid_mouth_interior_upper, :, :self.n_shape_params] = shape_dirs_mean
+            self.shapedirs[vid_mouth_interior_lower, :, :self.n_shape_params] = shape_dirs_mean
+
+            posedirs = self.posedirs.reshape(len(self.parents)-1, 9, num_verts_orig, 3)
+            posedirs = torch.cat([posedirs, torch.zeros_like(posedirs[:, :, :num_verts_mouth_interior])], dim=2)
+            self.posedirs = posedirs.reshape((len(self.parents)-1)*9, (num_verts_orig+num_verts_mouth_interior)*3)
+
+            self.J_regressor = torch.cat([self.J_regressor, torch.zeros_like(self.J_regressor[:, :num_verts_mouth_interior])], dim=1)
+
+            self.lbs_weights = torch.cat([self.lbs_weights, torch.zeros_like(self.lbs_weights[:num_verts_mouth_interior])], dim=0)
+            self.lbs_weights[vid_mouth_interior_upper, 1] += 1  # move with neck
+            self.lbs_weights[vid_mouth_interior_lower, 2] += 1  # move with jaw
+
+            f_mouth_upper = []
+            f_mouth_lower = []
+            for i in range(num_teeth - 1):
+                face = [teeth_vid_start + 4 * num_teeth + i, teeth_vid_start + 4 * num_teeth + i + 1, i + num_verts_orig]
+                f_mouth_upper.append(face)
+                face = [teeth_vid_start + 4 * num_teeth + i + 1, i + 1 + num_verts_orig, i + num_verts_orig]
+                f_mouth_upper.append(face)
+
+                face = [teeth_vid_start + 6 * num_teeth + i, num_teeth + i + num_verts_orig, teeth_vid_start + 6 * num_teeth + i + 1]
+                f_mouth_lower.append(face)
+                face = [teeth_vid_start + 6 * num_teeth + i + 1, num_teeth + i + num_verts_orig, num_teeth + i + 1 + num_verts_orig]
+                f_mouth_lower.append(face)
+
+            f_mouth_upper = torch.tensor(f_mouth_upper)
+            f_mouth_lower = torch.tensor(f_mouth_lower)
+
+            self.faces = torch.cat([self.faces, f_mouth_upper, f_mouth_lower], dim=0)
+            self.mask.update(self.faces, self.textures_idx)
 
     def forward(
         self,
