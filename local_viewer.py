@@ -98,15 +98,16 @@ class LocalViewer(Mini3DViewer):
     def init_gaussians(self):
         # load gaussians
         if (Path(self.cfg.point_path).parent / "flame_param.npz").exists():
-            self.gaussians = FlameGaussianModel(self.cfg.sh_degree, coord='normal')
+            self.gaussians = FlameGaussianModel(self.cfg.sh_degree, coord='bary')
         else:
-            self.gaussians = GaussianModel(self.cfg.sh_degree, coord='normal')
+            self.gaussians = GaussianModel(self.cfg.sh_degree, coord='bary')
 
-        selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['back_half_2', 'teeth'])
+        unselected_fid = []
+        selected_fid = []
+        # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['back_half_2', 'teeth'])
         # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['eye_region'])
-        # # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['right_half'])
+        # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['right_half'])
         # unselected_fid = self.gaussians.flame_model.mask.get_fid_except_fids(selected_fid)
-        # unselected_fid = []
         
         if self.cfg.point_path is not None:
             if self.cfg.point_path.exists():
@@ -636,13 +637,14 @@ class LocalViewer(Mini3DViewer):
                     # background_color = torch.tensor(self.cfg.background_color).cuda() * 0
                     # rgb_splatting = render(cam, self.gaussians, self.cfg.pipeline, background_color, scaling_modifier=dpg.get_value("_slider_scaling_modifier"), override_color=override_color)["render"].permute(1, 2, 0).contiguous()
 
-                if self.gaussians.binding is not None and dpg.get_value("_checkbox_show_mesh"):
-                    out_dict = self.mesh_renderer.render_from_camera(self.gaussians.verts, self.gaussians.faces, cam, face_colors=self.face_colors)
+                # if self.gaussians.binding is not None and dpg.get_value("_checkbox_show_mesh"):
+                out_dict = self.mesh_renderer.render_from_camera(self.gaussians.verts, self.gaussians.faces, self.gaussians.flame_model.verts_uvs, self.gaussians.flame_model.textures_idx, self.gaussians.flame_model._tex_painted, self.gaussians.flame_model._tex_alpha, cam, face_colors=self.face_colors)
 
-                    rgba_mesh = out_dict['rgba'].squeeze(0)  # (H, W, C)
-                    rgb_mesh = rgba_mesh[:, :, :3]
-                    alpha_mesh = rgba_mesh[:, :, 3:]
-                    mesh_opacity = self.mesh_color[3:].cuda()
+                rgba_mesh = out_dict['rgba'].squeeze(0)  # (H, W, C)
+                rgb_mesh = rgba_mesh[:, :, :3]
+                alpha_mesh = rgba_mesh[:, :, 3:]
+                mesh_opacity = self.mesh_color[3:].cuda()
+                alpha_mesh = alpha_mesh[0].unsqueeze(0).expand_as(rgb_mesh)
 
                 if dpg.get_value("_checkbox_show_splatting") and dpg.get_value("_checkbox_show_mesh"):
                     rgb = rgb_mesh * alpha_mesh * mesh_opacity  + rgb_splatting * (alpha_mesh * (1 - mesh_opacity) + (1 - alpha_mesh))
@@ -652,6 +654,9 @@ class LocalViewer(Mini3DViewer):
                     rgb = rgb_mesh
                 else:
                     rgb = torch.ones([self.H, self.W, 3])
+                
+                #clipping splatting to mesh
+                # rgb *= alpha_mesh
 
                 self.render_buffer = rgb.cpu().numpy()
                 if self.render_buffer.shape[0] != self.H or self.render_buffer.shape[1] != self.W:

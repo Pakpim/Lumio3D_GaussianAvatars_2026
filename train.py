@@ -163,6 +163,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         alpha_map = viewpoint_cam.fg_mask.cuda() # (w, h)
         
         alpha_map = alpha_map.unsqueeze(0).expand_as(gt_image)  # (3, w, h)
+
+        image = image * alpha_map
         gt_image = gt_image * alpha_map # (3, w, h)
 
         gt_filter = alpha_map
@@ -183,17 +185,37 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # print("debug texture", image.shape, rgba_mesh.shape,torch.max(image_s[3:, :, :]), torch.min(image_s[3:, :, :]),torch.max(alpha_mesh), torch.min(alpha_mesh))
             image += rgb_mesh * (1 - alpha_map)
             filter_render += alpha_mesh * (1 - alpha_map)
+        
+        out_dict = mesh_renderer.render_from_camera(gaussians.verts, gaussians.faces, gaussians.flame_model.verts_uvs, gaussians.flame_model.textures_idx, gaussians.flame_model._tex_painted, gaussians.flame_model._tex_alpha, viewpoint_cam)
+        rgba_mesh = out_dict['rgba'].squeeze(0).permute(2, 0, 1)  # (C, W, H)
+        rgb_mesh = rgba_mesh[:3, :, :]
+        alpha_mesh = rgba_mesh[3:, :, :]
+        mesh_render = rgb_mesh * alpha_mesh
+        # print("debug render", "mesh:", mesh_render.shape, "gt_image", gt_image.shape)
+        mesh_image_diff = torch.zeros_like(mesh_render)
+        mesh_image_diff[0] = mesh_render[0]
+        mesh_image_diff[1] = gt_image[1]
+        alpha_mesh = alpha_mesh[0].unsqueeze(0).expand_as(gt_image)
+        filter_diff = torch.zeros_like(gt_filter)
+        filter_diff[0] = gt_filter[0]
+        filter_diff[1] = filter_render[1]
 
-
-        if iteration % pipe.interval_media == 0 or iteration < 3:
+        if iteration % pipe.interval_media == 0 or iteration < 3 :
             save_image_debug(gt_filter, os.path.join(dataset.model_path, "gt_filter"), iteration)
             save_image_debug(filter_render, os.path.join(dataset.model_path, "ren_filter"), iteration)
             save_image_debug(gt_image, os.path.join(dataset.model_path, "gt_image"), iteration)
             save_image_debug(image, os.path.join(dataset.model_path, "rendered"), iteration)
+            # save_image_debug(mesh_render, os.path.join(dataset.model_path, "mesh"), iteration)
+            # save_image_debug(alpha_mesh, os.path.join(dataset.model_path, "mesh_alpha"), iteration)
+            save_image_debug(mesh_image_diff, os.path.join(dataset.model_path, "mesh_image_diff"), iteration)
+            save_image_debug(filter_diff, os.path.join(dataset.model_path, "filter_diff"), iteration)
 
         losses = {}
         losses['l1'] = l1_loss(image, gt_image) * (1.0 - opt.lambda_dssim)
         losses['ssim'] = (1.0 - ssim(image, gt_image)) * opt.lambda_dssim
+
+        # losses['l1'] *= 1e-5
+        # losses['ssim'] *= 1e-5
 
 
         if opt.train_texture and iteration >= opt.texture_start_iter:
@@ -203,7 +225,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             losses['texture'] = l1_loss(texture, gt_texture) * opt.texture_lambda
 
         # LM3D : filter loss
-        losses['filter'] = F.l1_loss(filter_render, gt_filter) * opt.lambda_filter
+        # losses['filter'] = F.l1_loss(filter_render, alpha_mesh) * opt.lambda_filter
+        losses['filter'] = (F.l1_loss(filter_render, gt_filter)) * opt.lambda_filter
 
 
         if gaussians.binding != None:
@@ -248,7 +271,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 postfix["Loss"] = f"{ema_loss_for_log:.{7}f}"
                 # ------------------------
                 postfix["opac"] = f"{gaussians.get_opacity.mean().item():.{7}f}"
-                postfix["filter"] = f"{losses['filter']:.{7}f}"
+                # postfix["filter"] = f"{losses['filter']:.{7}f}"
                 # ------------------------
                 if 'xyz' in losses:
                     postfix["xyz"] = f"{losses['xyz']:.{7}f}"
@@ -320,6 +343,8 @@ def prepare_output_and_logger(args):
         tb_writer = SummaryWriter(args.model_path)
     else:
         print("Tensorboard not available: not logging progress")
+
+    torch.cuda.empty_cache()
     return tb_writer
 
 def training_report(tb_writer, iteration, losses, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
@@ -427,6 +452,7 @@ def save_image_debug(image, dir, iteration):
     image = (image * 255).clamp(0, 255).byte()
     image = image.permute(1, 2, 0).cpu().numpy()
     Image.fromarray(image).save(os.path.join(dir, f"iter_{iteration}.jpg"))
+    torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -439,7 +465,7 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     # parser.add_argument("--interval", type=int, default=60_000, help="A shared iteration interval for test and saving results and checkpoints.")
-    parser.add_argument("--interval", type=int, default=2_000, help="A shared iteration interval for test and saving results and checkpoints.")
+    parser.add_argument("--interval", type=int, default=1000, help="A shared iteration interval for test and saving results and checkpoints.")
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--quiet", action="store_true")
@@ -447,7 +473,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     if args.interval > op.iterations:
-        args.interval = op.iterations // 5
+        args.interval = op.iterations
     if len(args.test_iterations) == 0:
         # args.test_iterations.extend(list(range(2)))
         args.test_iterations.extend(list(range(args.interval, args.iterations+1, args.interval)))

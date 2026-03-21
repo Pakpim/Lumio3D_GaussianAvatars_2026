@@ -195,8 +195,7 @@ class NVDiffRenderer(torch.nn.Module):
         full_proj_transform = cam.full_proj_transform.clone()
         full_proj_transform[:,1] = -full_proj_transform[:,1]
         full_proj = full_proj_transform.T[None, ...].to(verts)
-        if cam.image_width == 540 and cam.image_height == 960:
-            print("debug yueng yuu jaaa")
+        
         if self.use_opengl:
             image_size = cam.image_height, cam.image_width
             output = self.render_mesh(verts, faces, verts_uv, faces_uv, RT, full_proj, image_size, tex, alpha, background_color, face_colors)
@@ -285,7 +284,7 @@ class NVDiffRenderer(torch.nn.Module):
         diffuse = self.shade(normal)
         
         rgb = albedo
-        # rgb = albedo * diffuse
+        rgb = albedo * diffuse
         # alpha = fg_mask.float() * alpha_albedo[..., 0:1]
         alpha = fg_mask.float()
         rgba = torch.cat([rgb, alpha], dim=-1)

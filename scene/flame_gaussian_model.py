@@ -58,7 +58,7 @@ class FlameGaussianModel(GaussianModel):
             eyelid = self.flame_model.mask.get_fid_by_region(['eye_region'])
             back_head = self.flame_model.mask.get_fid_by_region(['back_head_2'])
             face_filter = torch.ones(len(self.flame_model.faces), dtype = bool)
-            face_filter[back_head] = False
+            # face_filter[back_head] = False
             faces = torch.arange(len(self.flame_model.faces))[face_filter]
             repeated_eyelid = torch.repeat_interleave(eyelid, n_eye_init).cuda()
             self.binding = torch.repeat_interleave(faces, n_init).cuda()
