@@ -107,12 +107,13 @@ def render_set(dataset : ModelParams, name, iteration, views, gaussians, pipelin
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_val : bool, skip_test : bool, render_mesh: bool, use_fastgs: bool = False, mult: float = 0.5):
     with torch.no_grad():
+        render_scale = getattr(dataset, "scale_res", 1.0)
         if dataset.bind_to_mesh:
             # gaussians = FlameGaussianModel(dataset.sh_degree, dataset.disable_flame_static_offset)
             gaussians = FlameGaussianModel(dataset.sh_degree, dataset.coord)
         else:
             gaussians = GaussianModel(dataset.sh_degree, dataset.coord)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, resolution_scales=[render_scale])
 
         # bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         ####
@@ -124,16 +125,16 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         if dataset.target_path != "":
              name = os.path.basename(os.path.normpath(dataset.target_path))
              # when loading from a target path, test cameras are merged into the train cameras
-             render_set(dataset, f'{name}', scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
+             render_set(dataset, f'{name}', scene.loaded_iter, scene.getTrainCameras(scale=render_scale), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
         else:
             if not skip_train:
-                render_set(dataset, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
+                render_set(dataset, "train", scene.loaded_iter, scene.getTrainCameras(scale=render_scale), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
             
             if not skip_val:
-                render_set(dataset, "val", scene.loaded_iter, scene.getValCameras(), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
+                render_set(dataset, "val", scene.loaded_iter, scene.getValCameras(scale=render_scale), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
 
             if not skip_test:
-                render_set(dataset, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
+                render_set(dataset, "test", scene.loaded_iter, scene.getTestCameras(scale=render_scale), gaussians, pipeline, background, render_mesh, use_fastgs, mult)
 
 if __name__ == "__main__":
     # Set up command line argument parser
