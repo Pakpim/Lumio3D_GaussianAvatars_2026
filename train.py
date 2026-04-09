@@ -79,6 +79,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # bg_color = [0.2824,0.4549,0.5294] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    use_fastgs = bool(opt.use_fastgs and FASTGS_AVAILABLE)
+    use_fused_ssim = bool(use_fastgs and FUSED_SSIM_AVAILABLE)
+    fastgs_filter_interval = max(1, int(getattr(opt, "fastgs_filter_interval", 1)))
+
+    if opt.use_fastgs and not FASTGS_AVAILABLE:
+        print("[WARN] --use_fastgs requested, but FastGS extension is unavailable. Falling back to vanilla rasterizer.")
+    elif use_fastgs:
+        print(f"[INFO] FastGS rasterizer enabled (mult={opt.mult}).")
+
+    if use_fused_ssim:
+        print("[INFO] Fused SSIM enabled.")
+    elif use_fastgs and not FUSED_SSIM_AVAILABLE:
+        print("[WARN] fused_ssim is unavailable. Falling back to standard SSIM.")
+
+    if use_fastgs and fastgs_filter_interval > 1:
+        print(f"[INFO] FastGS filter render interval: every {fastgs_filter_interval} iterations.")
+
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
@@ -159,7 +176,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        if opt.use_fastgs and FASTGS_AVAILABLE:
+        if use_fastgs:
             render_pkg = render_fastgs(viewpoint_cam, gaussians, pipe, background, backface_culling=opt.bcull, mult=opt.mult)
         else:
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, backface_culling=opt.bcull)
@@ -177,12 +194,31 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         gt_filter = alpha_map
 
-        # Single-render path: skip filter render when using FastGS
-        if opt.use_fastgs and FASTGS_AVAILABLE:
-            filter_render = None
-        else:
+        compute_filter_render = (not use_fastgs) or (iteration % fastgs_filter_interval == 0)
+        filter_render = None
+        if compute_filter_render:
             override_color = torch.ones_like(gaussians._xyz).cuda()
-            filter_render = render(viewpoint_cam, gaussians, pipe, torch.zeros(3).cuda() , override_color=override_color, backface_culling=opt.bcull, depth_map=opt.depth)["render"]
+            if use_fastgs:
+                filter_render = render_fastgs(
+                    viewpoint_cam,
+                    gaussians,
+                    pipe,
+                    torch.zeros(3).cuda(),
+                    override_color=override_color,
+                    backface_culling=opt.bcull,
+                    depth_map=opt.depth,
+                    mult=opt.mult,
+                )["render"]
+            else:
+                filter_render = render(
+                    viewpoint_cam,
+                    gaussians,
+                    pipe,
+                    torch.zeros(3).cuda(),
+                    override_color=override_color,
+                    backface_culling=opt.bcull,
+                    depth_map=opt.depth,
+                )["render"]
 
         if opt.disable_gaussian_splats:
             image = torch.zeros_like(image)
@@ -196,7 +232,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mesh = rgba_mesh[3:, :, :]
             # print("debug texture", image.shape, rgba_mesh.shape,torch.max(image_s[3:, :, :]), torch.min(image_s[3:, :, :]),torch.max(alpha_mesh), torch.min(alpha_mesh))
             image += rgb_mesh * (1 - alpha_map)
-            filter_render += alpha_mesh * (1 - alpha_map)
+            if filter_render is not None:
+                filter_render += alpha_mesh * (1 - alpha_map)
 
 
         if iteration % pipe.interval_media == 0 or iteration < 3:
@@ -209,7 +246,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         losses = {}
         losses['l1'] = l1_loss(image, gt_image) * (1.0 - opt.lambda_dssim)
         # Use CUDA fused SSIM when available with FastGS path
-        if opt.use_fastgs and FUSED_SSIM_AVAILABLE:
+        if use_fused_ssim:
             losses['ssim'] = (1.0 - fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))) * opt.lambda_dssim
         else:
             losses['ssim'] = (1.0 - ssim(image, gt_image)) * opt.lambda_dssim
@@ -221,9 +258,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             texture_alpha = gaussians.flame_model._tex_alpha.cuda()
             losses['texture'] = l1_loss(texture, gt_texture) * opt.texture_lambda
 
-        # LM3D : filter loss (skipped in FastGS single-render path)
+        # LM3D : filter loss
         if filter_render is not None:
-            losses['filter'] = F.l1_loss(filter_render, gt_filter) * opt.lambda_filter
+            filter_lambda = opt.lambda_filter * (fastgs_filter_interval if use_fastgs else 1)
+            losses['filter'] = F.l1_loss(filter_render, gt_filter) * filter_lambda
 
 
         if gaussians.binding != None:
