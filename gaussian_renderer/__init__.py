@@ -26,6 +26,40 @@ try:
 except ImportError:
     FASTGS_AVAILABLE = False
 
+
+def _prepare_metric_map(metric_map, image_height: int, image_width: int, device: torch.device, threshold: float = 0.5):
+    """Convert mask/metric inputs to FastGS metric_map format: flattened int tensor on GPU."""
+    if metric_map is None:
+        return torch.ones(image_height * image_width, dtype=torch.int, device=device)
+
+    if not torch.is_tensor(metric_map):
+        metric_map = torch.tensor(metric_map, device=device)
+    else:
+        metric_map = metric_map.to(device=device)
+
+    if metric_map.dim() == 1:
+        if metric_map.numel() != image_height * image_width:
+            raise ValueError("metric_map length must be image_height * image_width")
+        metric_map_2d = metric_map.reshape(image_height, image_width)
+    elif metric_map.dim() == 2:
+        if metric_map.shape != (image_height, image_width):
+            raise ValueError("2D metric_map must have shape (image_height, image_width)")
+        metric_map_2d = metric_map
+    elif metric_map.dim() == 3:
+        # Accept (C, H, W) or (H, W, C); first channel is used for binary masking.
+        if metric_map.shape[0] in (1, 3):
+            metric_map_2d = metric_map[0]
+        elif metric_map.shape[-1] in (1, 3):
+            metric_map_2d = metric_map[..., 0]
+        else:
+            raise ValueError("3D metric_map must be (C,H,W) or (H,W,C) with C in {1,3}")
+        if metric_map_2d.shape != (image_height, image_width):
+            raise ValueError("metric_map spatial size must match render resolution")
+    else:
+        raise ValueError("metric_map must be 1D, 2D, or 3D")
+
+    return (metric_map_2d > threshold).to(dtype=torch.int).reshape(-1).contiguous()
+
 # LM3D : some more arguments
 def render(viewpoint_camera, pc : Union[GaussianModel, FlameGaussianModel], pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, backface_culling = False, depth_map = False):
     """
@@ -181,16 +215,23 @@ def render(viewpoint_camera, pc : Union[GaussianModel, FlameGaussianModel], pipe
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : visibility,
+            "in_frustum_filter": visibility,
+            "rendering_filter": visibility,
+            "rendering_indices": torch.where(visibility)[0],
             "radii": radii}
 
 
 # LM3D : FastGS accelerated rasterizer path
 def render_fastgs(viewpoint_camera, pc: Union[GaussianModel, FlameGaussianModel], pipe, bg_color: torch.Tensor,
                   scaling_modifier=1.0, override_color=None, backface_culling=False, depth_map=False,
-                  mult=0.5, get_flag=False, metric_map=None):
+                  mult=0.5, get_flag=False, metric_map=None, mask_map=None, mask_threshold=0.5):
     """
     Render the scene using FastGS rasterizer with compact bounding boxes.
     Preserves lumio_base features: backface culling, depth map.
+
+    To extract points that actually contribute to rendered pixels (depth/transmittance-aware),
+    pass `mask_map` (H,W) / (1,H,W) / (H,W,1) or set `get_flag=True` with `metric_map`.
+    The returned `rendering_filter` and `rendering_indices` then correspond to contributing points.
     """
     assert FASTGS_AVAILABLE, "FastGS rasterizer not installed. Install submodules/diff-gaussian-rasterization_fastgs"
 
@@ -205,14 +246,35 @@ def render_fastgs(viewpoint_camera, pc: Union[GaussianModel, FlameGaussianModel]
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
-    if metric_map is None:
-        metric_map = torch.zeros(
-            int(viewpoint_camera.image_height) * int(viewpoint_camera.image_width),
-            dtype=torch.int, device='cuda')
+    image_height = int(viewpoint_camera.image_height)
+    image_width = int(viewpoint_camera.image_width)
+
+    use_contrib_counter = bool(get_flag or (metric_map is not None) or (mask_map is not None))
+
+    if mask_map is not None:
+        metric_map_tensor = _prepare_metric_map(
+            mask_map,
+            image_height,
+            image_width,
+            device=torch.device("cuda"),
+            threshold=mask_threshold,
+        )
+    elif metric_map is not None:
+        metric_map_tensor = _prepare_metric_map(
+            metric_map,
+            image_height,
+            image_width,
+            device=torch.device("cuda"),
+            threshold=0.5,
+        )
+    elif use_contrib_counter:
+        metric_map_tensor = torch.ones(image_height * image_width, dtype=torch.int, device='cuda')
+    else:
+        metric_map_tensor = torch.zeros(image_height * image_width, dtype=torch.int, device='cuda')
 
     raster_settings = FastGSRasterSettings(
-        image_height=int(viewpoint_camera.image_height),
-        image_width=int(viewpoint_camera.image_width),
+        image_height=image_height,
+        image_width=image_width,
         tanfovx=tanfovx,
         tanfovy=tanfovy,
         bg=bg_color,
@@ -224,8 +286,8 @@ def render_fastgs(viewpoint_camera, pc: Union[GaussianModel, FlameGaussianModel]
         mult=mult,
         prefiltered=False,
         debug=pipe.debug,
-        get_flag=get_flag,
-        metric_map=metric_map,
+        get_flag=use_contrib_counter,
+        metric_map=metric_map_tensor,
     )
 
     rasterizer = FastGSRasterizer(raster_settings=raster_settings)
@@ -290,8 +352,17 @@ def render_fastgs(viewpoint_camera, pc: Union[GaussianModel, FlameGaussianModel]
         rotations=rotations,
         cov3D_precomp=cov3D_precomp)
 
+    visibility = radii > 0
+    if use_contrib_counter:
+        rendering_filter = accum_metric_counts > 0
+    else:
+        rendering_filter = visibility
+
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
-            "visibility_filter": radii > 0,
+            "visibility_filter": visibility,
+            "in_frustum_filter": visibility,
+            "rendering_filter": rendering_filter,
+            "rendering_indices": torch.where(rendering_filter)[0],
             "radii": radii,
             "accum_metric_counts": accum_metric_counts}
