@@ -421,6 +421,15 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
+    def reset_scaling(self, scale_factor: float):
+        scale_factor = float(scale_factor)
+        if scale_factor <= 0.0:
+            return
+        scale_factor = min(scale_factor, 1.0)
+        scaling_new = self.scaling_inverse_activation(self.get_scaling * scale_factor)
+        optimizable_tensors = self.replace_tensor_to_optimizer(scaling_new, "scaling")
+        self._scaling = optimizable_tensors["scaling"]
+
     def union_ply(self, plydata, mask_area=None):
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
@@ -759,7 +768,7 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, visibility_filter=None):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, visibility_filter=None, clone_invisible_points: bool = False):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
@@ -767,7 +776,7 @@ class GaussianModel:
 
         # LM3D : clone also the invisible points
         print("Clone visible points:", selected_pts_mask.sum().item(), "out of", selected_pts_mask.shape[0])
-        if visibility_filter is not None:
+        if clone_invisible_points and visibility_filter is not None:
             invisibility_filter = torch.logical_not(visibility_filter)
             selected_pts_mask = torch.logical_or(selected_pts_mask, invisibility_filter)
             print("Clone invisible points:", invisibility_filter.sum().item(), "out of", invisibility_filter.shape[0])
@@ -790,11 +799,23 @@ class GaussianModel:
         
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_normal_offset)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, visibility_filter=None):
+    def densify_and_prune(
+        self,
+        max_grad,
+        min_opacity,
+        extent,
+        max_screen_size,
+        visibility_filter=None,
+        use_shortersplatting: bool = False,
+        scale_prune_quantile: float = 0.99,
+        scale_prune_factor: float = 10.0,
+        prune_max_fraction: float = 0.05,
+        clone_invisible_points: bool = False,
+    ):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent, visibility_filter)
+        self.densify_and_clone(grads, max_grad, extent, visibility_filter, clone_invisible_points=clone_invisible_points)
         self.densify_and_split(grads, max_grad, extent)
 
         # Prune masks
@@ -809,6 +830,32 @@ class GaussianModel:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+
+        if use_shortersplatting and prune_mask.shape[0] > 0:
+            scale_sum = self.get_scaling.sum(dim=1).float()
+            q = min(max(float(scale_prune_quantile), 0.5), 0.9999)
+            max_quantile_elems = 1_000_000
+            if scale_sum.numel() > max_quantile_elems:
+                step = max(1, scale_sum.numel() // max_quantile_elems)
+                quantile_source = scale_sum[::step]
+            else:
+                quantile_source = scale_sum
+            scale_threshold = torch.quantile(quantile_source, q) * max(float(scale_prune_factor), 1.0)
+            large_scale_mask = scale_sum > scale_threshold
+
+            # Keep regular pruning untouched and only cap additional scale-based pruning.
+            extra_mask = torch.logical_and(large_scale_mask, torch.logical_not(prune_mask))
+            max_extra = int(prune_mask.shape[0] * min(max(float(prune_max_fraction), 0.0), 1.0))
+            if max_extra > 0 and extra_mask.sum().item() > max_extra:
+                candidate_idx = torch.nonzero(extra_mask, as_tuple=False).squeeze(1)
+                candidate_scores = scale_sum[candidate_idx]
+                topk_idx = torch.topk(candidate_scores, k=max_extra, largest=True).indices
+                limited_extra_mask = torch.zeros_like(extra_mask)
+                limited_extra_mask[candidate_idx[topk_idx]] = True
+                extra_mask = limited_extra_mask
+
+            prune_mask = torch.logical_or(prune_mask, extra_mask)
+
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()

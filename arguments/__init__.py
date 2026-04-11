@@ -104,7 +104,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 200  # 100 (original)
         self.opacity_reset_interval = 5_000 # 3000 (original)
         self.densify_from_iter = 5_000  # 500 (original)
-        self.densify_until_iter = 1_000  # 15_000 (original)
+        self.densify_until_iter = 20_000  # 15_000 (original)
         self.densify_grad_threshold = 0.0005
         
         # GaussianAvatars
@@ -155,6 +155,16 @@ class OptimizationParams(ParamGroup):
         self.use_fastgs = False
         self.mult = 0.5  # FastGS bounding-box scaling multiplier
         self.fastgs_filter_interval = 4  # Compute FastGS filter/mask render every N iters (1 = every iter)
+
+        # ShorterSplatting-style controls (optional)
+        self.use_shortersplatting = False
+        self.lambda_entropy = 0.0
+        self.scale_reset_factor = 0.0
+        self.shorter_scale_prune_quantile = 0.99
+        self.shorter_scale_prune_factor = 10.0
+        self.shorter_prune_max_fraction = 0.05
+        self.shorter_clone_invisible_points = False
+        self.shorter_auto_tune_schedule = False
 
         super().__init__(parser, "Optimization Parameters")
 
