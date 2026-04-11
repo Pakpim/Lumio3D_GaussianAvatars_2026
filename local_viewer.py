@@ -98,9 +98,9 @@ class LocalViewer(Mini3DViewer):
     def init_gaussians(self):
         # load gaussians
         if (Path(self.cfg.point_path).parent / "flame_param.npz").exists():
-            self.gaussians = FlameGaussianModel(self.cfg.sh_degree, coord='normal')
+            self.gaussians = FlameGaussianModel(self.cfg.sh_degree, coord='bary')
         else:
-            self.gaussians = GaussianModel(self.cfg.sh_degree, coord='normal')
+            self.gaussians = GaussianModel(self.cfg.sh_degree, coord='bary')
 
         selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['back_half_2', 'teeth'])
         # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['eye_region'])

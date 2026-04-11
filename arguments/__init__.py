@@ -61,7 +61,7 @@ class ModelParams(ParamGroup):
         self.not_finetune_flame_params = False
         self.select_camera_id = -1
 
-        self.coord = "normal"  # normal, bary = barycentric
+        self.coord = "bary"  # normal, bary = barycentric
         self.ply_path = "" # Path to initial ply file for training
         self.texture_path = ""  # Path to the texture file
 
@@ -148,6 +148,9 @@ class OptimizationParams(ParamGroup):
         self.bcull = True
         self.depth = True
         self.max_scaling = 0.5  # LM3D : clamp scaling to 0.5
+        self.use_fastgs = False
+        self.mult = 0.5  # FastGS bounding-box scaling multiplier
+        self.fastgs_filter_interval = 4  # Compute FastGS filter/mask render every N iters (1 = every iter)
 
         super().__init__(parser, "Optimization Parameters")
 
