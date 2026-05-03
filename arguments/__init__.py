@@ -29,11 +29,15 @@ class ParamGroup:
             if shorthand:
                 if t == bool:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
+                    if value is True:
+                        group.add_argument("--no-" + key, dest=key, action="store_false")
                 else:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, type=t)
             else:
                 if t == bool:
                     group.add_argument("--" + key, default=value, action="store_true")
+                    if value is True:
+                        group.add_argument("--no-" + key, dest=key, action="store_false")
                 else:
                     group.add_argument("--" + key, default=value, type=t)
 
@@ -150,6 +154,9 @@ class OptimizationParams(ParamGroup):
         self.bcull = False
         self.depth = False
         self.max_scaling = 0.5  # LM3D : clamp scaling to 0.5
+        self.use_fastgs = False
+        self.mult = 0.5  # FastGS bounding-box scaling multiplier
+        self.fastgs_filter_interval = 4  # Compute FastGS filter/mask render every N iters (1 = every iter)
 
         super().__init__(parser, "Optimization Parameters")
 

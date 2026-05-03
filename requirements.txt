@@ -13,4 +13,6 @@ roma
 git+https://github.com/NVlabs/nvdiffrast
 #git+https://github.com/facebookresearch/pytorch3d.git
 submodules/diff-gaussian-rasterization
+submodules/diff-gaussian-rasterization_fastgs
+submodules/fused-ssim
 submodules/simple-knn
