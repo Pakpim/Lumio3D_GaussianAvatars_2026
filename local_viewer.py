@@ -47,7 +47,7 @@ class Config(Mini3DViewerConfig):
     """Path to the motion file (npz)"""
     sh_degree: int = 3
     """Spherical Harmonics degree"""
-    background_color: tuple[float, float, float] = (1., 1., 1.)
+    background_color: tuple[float, float, float] = (0., 0., 0.)
     """default GUI background color"""
     save_folder: Path = Path("./viewer_output")
     """default saving folder"""
@@ -104,7 +104,7 @@ class LocalViewer(Mini3DViewer):
 
         unselected_fid = []
         selected_fid = []
-        # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['back_half_2', 'teeth'])
+        selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['back_half_2', 'teeth'])
         # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['eye_region'])
         # selected_fid = self.gaussians.flame_model.mask.get_fid_by_region(['right_half'])
         # unselected_fid = self.gaussians.flame_model.mask.get_fid_except_fids(selected_fid)

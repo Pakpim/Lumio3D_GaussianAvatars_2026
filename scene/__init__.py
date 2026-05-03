@@ -56,6 +56,7 @@ class CameraDataset(torch.utils.data.Dataset):
 
             # ---- from loadCam() and Camera.__init__() ----
             resized_image_rgb = PILtoTorch(image, (camera.image_width, camera.image_height))
+            # resized_image_rgb = PILtoTorch(image, image.size)
             # print("debug read image:", resized_image_rgb.shape)
 
 
@@ -68,15 +69,26 @@ class CameraDataset(torch.utils.data.Dataset):
             ####
             # print("debug image:",resized_image_rgb.shape, resized_image_rgb.shape[1], image)
             camera.original_image = image.clamp(0.0, 1.0)
+            camera.image = image
 
-            # LM3D : load foreground mask
+            # LM3D : load foreground mask & outline
             #TODO: might causes bugs
             if camera.fg_mask_path is not None:
                 fg_mask = Image.open(camera.fg_mask_path)
                 resized_fg_mask = fg_mask.resize((camera.image_width, camera.image_height), Image.LANCZOS)
                 fg_data = np.array(resized_fg_mask.convert("L"))
+                # fg_data = np.array(fg_mask.convert("L"))
                 fg_data = torch.tensor(fg_data, dtype=torch.float32) / 255.0
                 camera.fg_mask = fg_data
+
+            if camera.outline_path is not None:
+                outline = Image.open(camera.outline_path)
+                resized_outline = outline.resize((camera.image_width, camera.image_height), Image.LANCZOS)
+                outline_data = np.array(resized_outline.convert("L"))
+                # outline_data = np.array(outline.convert("L"))
+                outline_data = torch.tensor(outline_data, dtype=torch.float32) / 255.0
+                camera.outline = outline_data
+            else: camera.outline = None
 
             return camera
         elif isinstance(idx, slice):

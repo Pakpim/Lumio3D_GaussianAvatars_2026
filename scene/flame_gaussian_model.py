@@ -58,7 +58,7 @@ class FlameGaussianModel(GaussianModel):
             eyelid = self.flame_model.mask.get_fid_by_region(['eye_region'])
             back_head = self.flame_model.mask.get_fid_by_region(['back_head_2'])
             face_filter = torch.ones(len(self.flame_model.faces), dtype = bool)
-            # face_filter[back_head] = False
+            face_filter[back_head] = False
             faces = torch.arange(len(self.flame_model.faces))[face_filter]
             repeated_eyelid = torch.repeat_interleave(eyelid, n_eye_init).cuda()
             self.binding = torch.repeat_interleave(faces, n_init).cuda()
@@ -76,18 +76,20 @@ class FlameGaussianModel(GaussianModel):
             self.num_timesteps = max(pose_meshes) + 1  # required by viewers
             num_verts = self.flame_model.v_template.shape[0]
 
+            mesh_timesteps = list(meshes.keys())
+            print("debug meshes", type(meshes), len(meshes),mesh_timesteps)
             if not self.disable_flame_static_offset:
-                static_offset = torch.from_numpy(meshes[0]['static_offset'])
+                static_offset = torch.from_numpy(meshes[mesh_timesteps[0]]['static_offset'])
                 if static_offset.shape[0] != num_verts:
-                    static_offset = torch.nn.functional.pad(static_offset, (0, 0, 0, num_verts - meshes[0]['static_offset'].shape[1]))
+                    static_offset = torch.nn.functional.pad(static_offset, (0, 0, 0, num_verts - meshes[mesh_timesteps[0]]['static_offset'].shape[1]))
             else:
                 static_offset = torch.zeros([num_verts, 3])
 
             T = self.num_timesteps
 
             self.flame_param = {
-                'shape': torch.from_numpy(meshes[0]['shape']),
-                'expr': torch.zeros([T, meshes[0]['expr'].shape[1]]),
+                'shape': torch.from_numpy(meshes[mesh_timesteps[0]]['shape']),
+                'expr': torch.zeros([T, meshes[mesh_timesteps[0]]['expr'].shape[1]]),
                 'rotation': torch.zeros([T, 3]),
                 'neck_pose': torch.zeros([T, 3]),
                 'jaw_pose': torch.zeros([T, 3]),
@@ -142,6 +144,7 @@ class FlameGaussianModel(GaussianModel):
         self.update_mesh_properties(verts, verts_cano)
 
     def select_mesh_by_timestep(self, timestep, original=False):
+        # timestep = 0
         self.timestep = timestep
         flame_param = self.flame_param_orig if original and self.flame_param_orig != None else self.flame_param
         # print("debug flame_param keys:", flame_param.keys())
@@ -149,6 +152,12 @@ class FlameGaussianModel(GaussianModel):
         #     print(f"debug flame_param[{keys}].shape:", flame_param[keys].shape)
         verts, verts_cano = self.flame_model(
             flame_param['shape'][None, ...],
+            # flame_param['expr'][[0]],
+            # flame_param['rotation'][[0]],
+            # flame_param['neck_pose'][[0]],
+            # flame_param['jaw_pose'][[0]],
+            # flame_param['eyes_pose'][[0]],
+            # flame_param['translation'][[0]],
             flame_param['expr'][[timestep]],
             flame_param['rotation'][[timestep]],
             flame_param['neck_pose'][[timestep]],
@@ -159,6 +168,7 @@ class FlameGaussianModel(GaussianModel):
             return_landmarks=False,
             return_verts_cano=True,
             static_offset=flame_param['static_offset'],
+            # dynamic_offset=flame_param['dynamic_offset'][[0]],
             dynamic_offset=flame_param['dynamic_offset'][[timestep]],
         )
         self.update_mesh_properties(verts, verts_cano)

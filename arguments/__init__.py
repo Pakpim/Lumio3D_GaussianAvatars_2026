@@ -52,7 +52,7 @@ class ModelParams(ParamGroup):
         self._model_path = ""  # Path to the folder to save trained models
         self.teeth_path = ""  # Path to the teeth mesh
         self._images = "images"
-        self._resolution = -1
+        self._resolution = 1
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
@@ -62,11 +62,12 @@ class ModelParams(ParamGroup):
         self.select_camera_id = -1
 
         self.coord = "bary"  # normal, bary = barycentric
-        self.ply_path = "" # Path to initial ply file for training
+        self.ply_path = None # Path to initial ply file for training
+        # self.ply_path = " /rpool/data/pim/GA_out/bird_new_v01_test08/point_cloud/iteration_10000/point_cloud_bary.ply" # Path to initial ply file for training
         self.texture_path = ""  # Path to the texture file
 
-        self.omit_camera_id = [13, 14] # List of camera IDs to omit from training
-        self.scale_res = 0.25
+        self.omit_camera_id = [12,14,15] # List of camera IDs to omit from training
+        self.scale_res = 0.6
 
 
         super().__init__(parser, "Loading Parameters", sentinel)
@@ -81,7 +82,7 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
-        self.interval_media = 100  
+        self.interval_media = 1
         self.load_from_iter = 5000
         super().__init__(parser, "Pipeline Parameters")
 
@@ -97,9 +98,9 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.3 # 0.2 (original)
         self.scaling_lr = 0.01  # (scaled up according to mean triangle scale)  # 0.005 (original) # 0.01 (small + bary)
         self.rotation_lr = 0.01 # 0.01 (small + bary)
-        self.densification_interval = 1000  # 100 (original)
-        self.opacity_reset_interval = 2000 # 3000 (original)
-        self.densify_from_iter = 5000  # 500 (original)
+        self.densification_interval = 30_000  # 100 (original)
+        self.opacity_reset_interval = 30_000 # 3000 (original)
+        self.densify_from_iter = 500  # 500 (original)
         self.densify_until_iter = 20_000  # 15_000 (original)
         self.densify_grad_threshold = 0.0005
         
@@ -127,9 +128,9 @@ class OptimizationParams(ParamGroup):
         self.texture_lr = 0.0025
         self.texture_lambda = 0.1
 
-        self.initial_pc_size = 0.01 # 0.04 (original)
-        self.initial_pc_number = 300 # 200
-        self.initial_pc_number_eye = 100 # 100
+        self.initial_pc_size = 0.04 # 0.04 (original)
+        self.initial_pc_number = 150 # 200
+        self.initial_pc_number_eye = 50 # 100
         
         self.normal_position_lr = 5e-06 # 0.00005 (small + bary) 
 
@@ -144,7 +145,8 @@ class OptimizationParams(ParamGroup):
             self.texture_start_iter = 0
 
         # Lumio Optims
-        self.lambda_filter = 10
+        self.lambda_filter = 2
+        self.lambda_opacity = 2e-5
         self.bcull = False
         self.depth = False
         self.max_scaling = 0.5  # LM3D : clamp scaling to 0.5

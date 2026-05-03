@@ -41,6 +41,7 @@ class CameraInfo(NamedTuple):
     timestep: Optional[int] = None
     camera_id: Optional[int] = None
     fg_mask_path: Optional[str] = None # LM3D : path to foreground mask
+    outline_path: Optional[str] = None # LM3D : path to image edges
 
 class SceneInfo(NamedTuple):
     train_cameras: list
@@ -202,8 +203,18 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             file_path = frame["file_path"]
 
             # LM3D : fg_mask_path -------------------------
-            fg_mask_path = frame["fg_mask_path"]
-            fg_mask_path = os.path.join(path, fg_mask_path)
+            if 'fg_mask_path' in frame:
+                fg_mask_path = frame["fg_mask_path"]
+                fg_mask_path = os.path.join(path, fg_mask_path)
+            else:
+                fg_mask_path = None
+
+            # LM3D: outline_path
+            if 'outline_path' in frame:
+                outline_path = frame["outline_path"]
+                outline_path = os.path.join(path, outline_path)
+            else:
+                outline_path = None
             # ---------------------------------------------
 
             if extension not in frame["file_path"]:
@@ -259,7 +270,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             
             cam_infos.append(CameraInfo(
                 uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, cx=cx, cy=cy, bg=bg, image=image, 
-                image_path=image_path, fg_mask_path=fg_mask_path, image_name=image_name, 
+                image_path=image_path, fg_mask_path=fg_mask_path, outline_path=outline_path, image_name=image_name, 
                 width=width, height=height, 
                 timestep=timestep, camera_id=camera_id))
     return cam_infos

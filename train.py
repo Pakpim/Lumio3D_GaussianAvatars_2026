@@ -60,7 +60,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         mesh_renderer = NVDiffRenderer()
     else:
         gaussians = GaussianModel(dataset.sh_degree, dataset.coord)
-    scene = Scene(dataset, gaussians, resolution_scales=[dataset.scale_res], opt=opt)
+    scene = Scene(dataset, gaussians, resolution_scales=[dataset.scale_res], ply_path = dataset.ply_path, opt=opt)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -161,9 +161,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
       
         # LM3D : alpha map for image
         alpha_map = viewpoint_cam.fg_mask.cuda() # (w, h)
-        
         alpha_map = alpha_map.unsqueeze(0).expand_as(gt_image)  # (3, w, h)
 
+        # LM3D : for omit outline parts of image
+        if viewpoint_cam.outline is not None:
+            outline_image = viewpoint_cam.outline.cuda()
+            outline_image = outline_image.unsqueeze(0).expand_as(gt_image)  # (3, w, h)
+        else:
+            outline_image = None
+
+        log_image = image
         image = image * alpha_map
         gt_image = gt_image * alpha_map # (3, w, h)
 
@@ -186,6 +193,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image += rgb_mesh * (1 - alpha_map)
             filter_render += alpha_mesh * (1 - alpha_map)
         
+        # LM3D remove outline
+        if outline_image is not None:
+            image = image.clone() * outline_image
+            gt_image = gt_image.clone() * outline_image
+            filter_render = filter_render.clone() * outline_image
+            gt_filter = gt_filter.clone() * outline_image
+
         out_dict = mesh_renderer.render_from_camera(gaussians.verts, gaussians.faces, gaussians.flame_model.verts_uvs, gaussians.flame_model.textures_idx, gaussians.flame_model._tex_painted, gaussians.flame_model._tex_alpha, viewpoint_cam)
         rgba_mesh = out_dict['rgba'].squeeze(0).permute(2, 0, 1)  # (C, W, H)
         rgb_mesh = rgba_mesh[:3, :, :]
@@ -200,15 +214,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         filter_diff[0] = gt_filter[0]
         filter_diff[1] = filter_render[1]
 
-        if iteration % pipe.interval_media == 0 or iteration < 3 :
+        if iteration % pipe.interval_media == 0 or iteration < 10 :
             save_image_debug(gt_filter, os.path.join(dataset.model_path, "gt_filter"), iteration)
             save_image_debug(filter_render, os.path.join(dataset.model_path, "ren_filter"), iteration)
             save_image_debug(gt_image, os.path.join(dataset.model_path, "gt_image"), iteration)
             save_image_debug(image, os.path.join(dataset.model_path, "rendered"), iteration)
+            save_image_debug(log_image, os.path.join(dataset.model_path, "rendered_whole"), iteration)
             # save_image_debug(mesh_render, os.path.join(dataset.model_path, "mesh"), iteration)
             # save_image_debug(alpha_mesh, os.path.join(dataset.model_path, "mesh_alpha"), iteration)
             save_image_debug(mesh_image_diff, os.path.join(dataset.model_path, "mesh_image_diff"), iteration)
             save_image_debug(filter_diff, os.path.join(dataset.model_path, "filter_diff"), iteration)
+            if outline_image is not None: save_image_debug(outline_image, os.path.join(dataset.model_path, "outline_image"), iteration)
+
 
         losses = {}
         losses['l1'] = l1_loss(image, gt_image) * (1.0 - opt.lambda_dssim)
@@ -228,6 +245,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # losses['filter'] = F.l1_loss(filter_render, alpha_mesh) * opt.lambda_filter
         losses['filter'] = (F.l1_loss(filter_render, gt_filter)) * opt.lambda_filter
 
+        # print("debug opacity ",gaussians.get_opacity.mean())
+        losses['opacity'] =  gaussians.get_opacity.mean()* opt.lambda_opacity
 
         if gaussians.binding != None:
             if opt.metric_xyz:
@@ -297,7 +316,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             # Densification
             if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
+                # Keep track of max radii in image-space for pruning 
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
@@ -310,7 +329,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
-                    ###
+                    ##
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -493,7 +512,9 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     ####
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    pipe = pp.extract(args)
+    pipe.interval_media = int(os.getenv("MEDIA_INTERVAL", pipe.interval_media))
+    training(lp.extract(args), op.extract(args), pipe, args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
     # training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done

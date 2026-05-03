@@ -23,6 +23,8 @@ def loadCam(args, id, cam_info, resolution_scale):
 
     if args.resolution in [1, 2, 4, 8]:
         image_width, image_height = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+        scale = float(resolution_scale)
+        cx, cy = (int(orig_cx / scale), int(orig_cy / scale))
     else:  # should be a type that converts to float
         if args.resolution == -1:
             if orig_w > 1600:
@@ -50,7 +52,8 @@ def loadCam(args, id, cam_info, resolution_scale):
                 image_path=cam_info.image_path,
                 image_name=cam_info.image_name, uid=id, 
                 timestep=cam_info.timestep, data_device=args.data_device,
-                fg_mask_path=cam_info.fg_mask_path) # LM3D : fg mask path
+                fg_mask_path=cam_info.fg_mask_path,
+                outline_path=cam_info.outline_path) # LM3D : fg mask path
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []

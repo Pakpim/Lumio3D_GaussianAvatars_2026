@@ -262,10 +262,10 @@ class GaussianModel:
         rots[:, 0] = 1
 
         # Original opacity init
-        # opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         # LM3D : opacity set to 1.0 for all points
-        opacities = inverse_sigmoid(torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        # opacities = inverse_sigmoid(torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
         
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -581,18 +581,31 @@ class GaussianModel:
         #     self.union_ply(eye_plydata, 'eyes')
 
         ####
-        print("debug train", 'is_training' in kwargs and kwargs['is_training'] is True)
-        if 'is_training' in kwargs and kwargs['is_training'] is True:
-            self.xyz_gradient_accum = torch.zeros((self._xyz.shape[0], 1), device="cuda")
-            self.denom = torch.zeros((self._xyz.shape[0], 1), device="cuda")
-            self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
-            num_pts = self._xyz.shape[0]
-            fused_color = torch.tensor(np.random.random((num_pts, 3)) / 255.0).float().cuda()
-            features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
-            features[:, :3, 0 ] = fused_color
-            features[:, 3:, 1:] = 0.0
-            self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
-            self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        # self.xyz_gradient_accum = torch.zeros((self._xyz.shape[0], 1), device="cuda")
+        # self.denom = torch.zeros((self._xyz.shape[0], 1), device="cuda")
+        # self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        # num_pts = self._xyz.shape[0]
+        # fused_color = torch.tensor(np.random.random((num_pts, 3)) / 255.0).float().cuda()
+        # features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        # features[:, :3, 0 ] = fused_color
+        # features[:, 3:, 1:] = 0.0
+        # self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        # self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        # print("ply loaded!")
+
+        # print("debug train", 'is_training' in kwargs and kwargs['is_training'] is True)
+        # if 'is_training' in kwargs and kwargs['is_training'] is True:
+        #     self.xyz_gradient_accum = torch.zeros((self._xyz.shape[0], 1), device="cuda")
+        #     self.denom = torch.zeros((self._xyz.shape[0], 1), device="cuda")
+        #     self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        #     print("??????")
+        #     num_pts = self._xyz.shape[0]
+        #     fused_color = torch.tensor(np.random.random((num_pts, 3)) / 255.0).float().cuda()
+        #     features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        #     features[:, :3, 0 ] = fused_color
+        #     features[:, 3:, 1:] = 0.0
+        #     self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        #     self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
 
         self.binding_counter = torch.bincount(self.binding)
 
