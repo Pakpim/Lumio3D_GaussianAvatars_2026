@@ -38,7 +38,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr, error_map
 from lpipsPyTorch import lpips
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 
 from PIL import Image
 import numpy as np
@@ -189,6 +189,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     use_fastgs = bool(opt.use_fastgs and FASTGS_AVAILABLE)
     use_fused_ssim = bool(use_fastgs and FUSED_SSIM_AVAILABLE)
     fastgs_filter_interval = max(1, int(getattr(opt, "fastgs_filter_interval", 1)))
+    fastgs_use_contributing_filter = bool(use_fastgs and getattr(opt, "fastgs_use_contributing_filter", False))
     use_shortersplatting = bool(getattr(opt, "use_shortersplatting", False))
     lambda_entropy = max(0.0, float(getattr(opt, "lambda_entropy", 0.0)))
     scale_reset_factor = max(0.0, float(getattr(opt, "scale_reset_factor", 0.0)))
@@ -218,6 +219,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     if use_fastgs and fastgs_filter_interval > 1:
         print(f"[INFO] FastGS filter render interval: every {fastgs_filter_interval} iterations.")
+
+    if fastgs_use_contributing_filter:
+        print("[INFO] FastGS contributing-point filter enabled for densify/prune stats.")
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -300,10 +304,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
         if use_fastgs:
-            render_pkg = render_fastgs(viewpoint_cam, gaussians, pipe, background, backface_culling=opt.bcull, mult=opt.mult)
+            render_pkg = render_fastgs(
+                viewpoint_cam,
+                gaussians,
+                pipe,
+                background,
+                backface_culling=opt.bcull,
+                mult=opt.mult,
+                get_flag=fastgs_use_contributing_filter,
+            )
         else:
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, backface_culling=opt.bcull)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        densify_visibility_filter = visibility_filter
+        if fastgs_use_contributing_filter:
+            densify_visibility_filter = render_pkg.get("rendering_filter", visibility_filter)
+            if int(densify_visibility_filter.sum().item()) == 0:
+                densify_visibility_filter = visibility_filter
         ####
         
         # Loss
@@ -408,17 +425,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         if gaussians.binding != None:
             if opt.metric_xyz:
-                losses['xyz'] = F.relu((gaussians._xyz*gaussians.face_scaling[gaussians.binding])[visibility_filter] - opt.threshold_xyz).norm(dim=1).mean() * opt.lambda_xyz
+                losses['xyz'] = F.relu((gaussians._xyz*gaussians.face_scaling[gaussians.binding])[densify_visibility_filter] - opt.threshold_xyz).norm(dim=1).mean() * opt.lambda_xyz
             else:
                 # losses['xyz'] = gaussians._xyz.norm(dim=1).mean() * opt.lambda_xyz
-                losses['xyz'] = F.relu(gaussians._xyz[visibility_filter].norm(dim=1) - opt.threshold_xyz).mean() * opt.lambda_xyz
+                losses['xyz'] = F.relu(gaussians._xyz[densify_visibility_filter].norm(dim=1) - opt.threshold_xyz).mean() * opt.lambda_xyz
 
             if opt.lambda_scale != 0:
                 if opt.metric_scale:
-                    losses['scale'] = F.relu(gaussians.get_scaling[visibility_filter] - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
+                    losses['scale'] = F.relu(gaussians.get_scaling[densify_visibility_filter] - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
                 else:
                     # losses['scale'] = F.relu(gaussians._scaling).norm(dim=1).mean() * opt.lambda_scale
-                    losses['scale'] = F.relu(torch.exp(gaussians._scaling[visibility_filter]) - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
+                    losses['scale'] = F.relu(torch.exp(gaussians._scaling[densify_visibility_filter]) - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
 
             if opt.lambda_dynamic_offset != 0:
                 losses['dy_off'] = gaussians.compute_dynamic_offset_loss() * opt.lambda_dynamic_offset
@@ -478,8 +495,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Densification
             if iteration < densify_until_iter:
                 # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.max_radii2D[densify_visibility_filter] = torch.max(
+                    gaussians.max_radii2D[densify_visibility_filter],
+                    radii[densify_visibility_filter],
+                )
+                gaussians.add_densification_stats(viewspace_point_tensor, densify_visibility_filter)
 
                 if iteration > densify_from_iter and iteration % densification_interval == 0:
                     size_threshold = 20 if iteration > opacity_reset_interval else None
@@ -501,7 +521,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         min_opacity,
                         scene.cameras_extent,
                         size_threshold,
-                        visibility_filter=visibility_filter,
+                        visibility_filter=densify_visibility_filter,
                         use_shortersplatting=use_shortersplatting,
                         scale_prune_quantile=shorter_scale_prune_quantile,
                         scale_prune_factor=shorter_scale_prune_factor,
@@ -688,7 +708,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    args = parser.parse_args(sys.argv[1:])
+    args = get_combined_args(parser)
     if args.interval > op.iterations:
         args.interval = op.iterations // 5
     if len(args.test_iterations) == 0:

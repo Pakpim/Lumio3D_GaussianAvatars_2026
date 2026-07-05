@@ -50,17 +50,17 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
-        self.sh_degree = 0
+        self.sh_degree = 3
         self._source_path = ""  # Path to the source data set
         self._target_path = ""  # Path to the target data set for pose and expression transfer
         self._model_path = ""  # Path to the folder to save trained models
         self.teeth_path = ""  # Path to the teeth mesh
         self._images = "images"
         self._resolution = -1
-        self._white_background = False
+        self._white_background = True
         self.data_device = "cuda"
-        self.eval = False
-        self.bind_to_mesh = False
+        self.eval = True
+        self.bind_to_mesh = True
         self.disable_flame_static_offset = False
         self.not_finetune_flame_params = False
         self.select_camera_id = -1
@@ -69,9 +69,9 @@ class ModelParams(ParamGroup):
         self.ply_path = "" # Path to initial ply file for training
         self.texture_path = ""  # Path to the texture file
 
-        self.omit_camera_id = [13, 14] # List of camera IDs to omit from training
-        self.scale_res = 0.25
-
+        # self.omit_camera_id = [13, 500] # List of camera IDs to omit from training
+        self.omit_camera_id = []
+        self.scale_res = 1
 
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -123,7 +123,6 @@ class OptimizationParams(ParamGroup):
         self.lambda_laplacian = 0.
         self.lambda_dynamic_offset_std = 0  #1.
 
-
         self.disable_gaussian_splats = False
         self.with_texture = False
         self.texture_start_iter = 0
@@ -139,8 +138,8 @@ class OptimizationParams(ParamGroup):
 
         if self.disable_gaussian_splats:
             self.scaling_lr = 0.0
-            self.opacity_reset_interval = 600_000
-            self.densify_from_iter = 600_000
+            self.opacity_reset_interval = 3_000 # 600_000
+            self.densify_from_iter = 25_000 # 600_000
             self.densify_until_iter = -1
         
         if self.train_texture:
@@ -152,9 +151,10 @@ class OptimizationParams(ParamGroup):
         self.bcull = True
         self.depth = True
         self.max_scaling = 0.5  # LM3D : clamp scaling to 0.5
-        self.use_fastgs = False
-        self.mult = 0.5  # FastGS bounding-box scaling multiplier
-        self.fastgs_filter_interval = 4  # Compute FastGS filter/mask render every N iters (1 = every iter)
+        self.use_fastgs = True
+        self.mult = 0.75  # FastGS bounding-box scaling multiplier
+        self.fastgs_filter_interval = 1  # Compute FastGS filter/mask render every N iters (1 = every iter)
+        self.fastgs_use_contributing_filter = True  # Use FastGS contributing-point mask for densify/prune stats
 
         # ShorterSplatting-style controls (optional)
         self.use_shortersplatting = False
@@ -172,20 +172,24 @@ def get_combined_args(parser : ArgumentParser):
     cmdlne_string = sys.argv[1:]
     cfgfile_string = "Namespace()"
     args_cmdline = parser.parse_args(cmdlne_string)
+    args_defaults = parser.parse_args([])
+
+    model_path = args_cmdline.model_path or os.environ.get("MODEL_PATH", "")
 
     try:
-        cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
+        cfgfilepath = os.path.join(model_path, "cfg_args")
         print("Looking for config file in", cfgfilepath)
         with open(cfgfilepath) as cfg_file:
             print("Config file found: {}".format(cfgfilepath))
             cfgfile_string = cfg_file.read()
-    except TypeError:
-        print("Config file not found at")
+    except (TypeError, FileNotFoundError):
+        print("Config file not found, using defaults + CLI args")
         pass
     args_cfgfile = eval(cfgfile_string)
 
-    merged_dict = vars(args_cfgfile).copy()
+    merged_dict = vars(args_defaults).copy()
+    merged_dict.update(vars(args_cfgfile))
     for k,v in vars(args_cmdline).items():
-        if v != None:
+        if v != getattr(args_defaults, k):
             merged_dict[k] = v
     return Namespace(**merged_dict)

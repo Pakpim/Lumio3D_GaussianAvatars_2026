@@ -27,6 +27,24 @@ import torch.nn as nn
 import numpy as np
 import pickle
 from collections import defaultdict
+
+# chumpy expects deprecated NumPy aliases that were removed in NumPy 2.x.
+# Define them here before loading the FLAME pickle so unpickling can import chumpy.
+if not hasattr(np, "bool"):
+    np.bool = np.bool_
+if not hasattr(np, "int"):
+    np.int = int
+if not hasattr(np, "float"):
+    np.float = float
+if not hasattr(np, "complex"):
+    np.complex = complex
+if not hasattr(np, "object"):
+    np.object = np.object_
+if not hasattr(np, "str"):
+    np.str = str
+if not hasattr(np, "unicode"):
+    np.unicode = str
+
 try:
     from pytorch3d.io import load_obj
 except ImportError:
