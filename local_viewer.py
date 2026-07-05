@@ -9,6 +9,7 @@
 import json
 import math
 import tyro
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 from pathlib import Path
@@ -93,7 +94,7 @@ class LocalViewer(Mini3DViewer):
             self.num_timesteps = self.gaussians.num_timesteps
             dpg.configure_item("_slider_timestep", max_value=self.num_timesteps - 1)
 
-            self.gaussians.select_mesh_by_timestep(self.timestep)
+            self._set_timestep(self.timestep, "init")
 
     def init_gaussians(self):
         # load gaussians
@@ -111,8 +112,17 @@ class LocalViewer(Mini3DViewer):
         if self.cfg.point_path is not None:
             if self.cfg.point_path.exists():
                 self.gaussians.load_ply(self.cfg.point_path, has_target=False, motion_path=self.cfg.motion_path, disable_fid=selected_fid)
+                self._restore_checkpoint_state_if_available()
             else:
                 raise FileNotFoundError(f'{self.cfg.point_path} does not exist.')
+
+    def _set_timestep(self, timestep, reason):
+        self.timestep = timestep
+        dpg.set_value("_slider_timestep", self.timestep)
+        self.gaussians.select_mesh_by_timestep(self.timestep)
+
+    def _restore_checkpoint_state_if_available(self):
+        pass
 
     def refresh_stat(self):
         if self.last_time_fresh is not None:
@@ -277,8 +287,7 @@ class LocalViewer(Mini3DViewer):
             # update timestep
             if dpg.get_value("_checkbox_dynamic_record"):
                 self.timestep = min(self.timestep + 1, self.num_timesteps - 1)
-                dpg.set_value("_slider_timestep", self.timestep)
-                self.gaussians.select_mesh_by_timestep(self.timestep)
+                self._set_timestep(self.timestep, "record")
         
         traj_dict['timestep_indices'] = sorted(list(set(timestep_indices)))
         traj_dict['camera_indices'] = sorted(list(set(camera_indices)))
@@ -345,8 +354,7 @@ class LocalViewer(Mini3DViewer):
                     elif sender == "_mvKey_End":
                         self.timestep = self.num_timesteps - 1
 
-                    dpg.set_value("_slider_timestep", self.timestep)
-                    self.gaussians.select_mesh_by_timestep(self.timestep)
+                    self._set_timestep(self.timestep, "manual")
 
                     self.need_update = True
                 with dpg.group(horizontal=True):
@@ -534,7 +542,7 @@ class LocalViewer(Mini3DViewer):
                     if app_data:
                         self.gaussians.update_mesh_by_param_dict(self.flame_param)
                     else:
-                        self.gaussians.select_mesh_by_timestep(self.timestep)
+                        self._set_timestep(self.timestep, "control-off")
                     self.need_update = True
                 dpg.add_checkbox(label="enable control", default_value=False, tag="_checkbox_enable_control", callback=callback_enable_control)
 
@@ -601,8 +609,7 @@ class LocalViewer(Mini3DViewer):
                 delta = app_data
                 if dpg.is_item_hovered("_slider_timestep"):
                     self.timestep = min(max(self.timestep - delta, 0), self.num_timesteps - 1)
-                    dpg.set_value("_slider_timestep", self.timestep)
-                    self.gaussians.select_mesh_by_timestep(self.timestep)
+                    self._set_timestep(self.timestep, "wheel")
                     self.need_update = True
             dpg.add_mouse_wheel_handler(callback=callbackmouse_wheel_slider)
 
@@ -675,8 +682,7 @@ class LocalViewer(Mini3DViewer):
                             if self.timestep >= self.num_timesteps - 1:
                                 self.timestep = 0
 
-                            dpg.set_value("_slider_timestep", self.timestep)
-                            self.gaussians.select_mesh_by_timestep(self.timestep)
+                            self._set_timestep(self.timestep, "play")
                             
                             time.sleep(1 / self.cfg.fps)
 

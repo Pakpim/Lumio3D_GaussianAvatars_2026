@@ -56,10 +56,10 @@ class FlameGaussianModel(GaussianModel):
                 n_init = 1
                 n_eye_init = 1
             eyelid = self.flame_model.mask.get_fid_by_region(['eye_region'])
-            back_head = self.flame_model.mask.get_fid_by_region(['back_head_2'])
-            face_filter = torch.ones(len(self.flame_model.faces), dtype = bool)
-            face_filter[back_head] = False
-            faces = torch.arange(len(self.flame_model.faces))[face_filter]
+            # All faces (including back_head) get n_init splats. Eyelid faces get
+            # an extra n_eye_init. (Previously back_head was re-added here, which
+            # double-counted those faces and inflated the splat count.)
+            faces = torch.arange(len(self.flame_model.faces))
             repeated_eyelid = torch.repeat_interleave(eyelid, n_eye_init).cuda()
             self.binding = torch.repeat_interleave(faces, n_init).cuda()
             self.binding = torch.cat((self.binding, repeated_eyelid), dim=0)
@@ -106,8 +106,10 @@ class FlameGaussianModel(GaussianModel):
                 self.flame_param['translation'][i] = torch.from_numpy(mesh['translation'])
                 # self.flame_param['dynamic_offset'][i] = torch.from_numpy(mesh['dynamic_offset'])
             
+            # Keep FLAME parameters on CPU for now to avoid large startup GPU allocations.
+            # They will be moved to the FLAME model device later in training_setup.
             for k, v in self.flame_param.items():
-                self.flame_param[k] = v.float().cuda()
+                self.flame_param[k] = v.float()
             
             self.flame_param_orig = {k: v.clone() for k, v in self.flame_param.items()}
         else:
@@ -126,18 +128,28 @@ class FlameGaussianModel(GaussianModel):
         else:
             static_offset = self.flame_param['static_offset']
 
+        # Move only the needed tensors to the FLAME model device for this computation.
+        device = next(self.flame_model.parameters()).device
+        expr = flame_param['expr'].to(device)
+        rotation = flame_param['rotation'].to(device)
+        neck = flame_param['neck'].to(device)
+        jaw = flame_param['jaw'].to(device)
+        eyes = flame_param['eyes'].to(device)
+        translation = flame_param['translation'].to(device)
+        static_offset_dev = static_offset.to(device) if static_offset is not None else None
+
         verts, verts_cano = self.flame_model(
-            shape[None, ...],
-            flame_param['expr'].cuda(),
-            flame_param['rotation'].cuda(),
-            flame_param['neck'].cuda(),
-            flame_param['jaw'].cuda(),
-            flame_param['eyes'].cuda(),
-            flame_param['translation'].cuda(),
+            shape[None, ...].to(device),
+            expr,
+            rotation,
+            neck,
+            jaw,
+            eyes,
+            translation,
             zero_centered_at_root_node=False,
             return_landmarks=False,
             return_verts_cano=True,
-            static_offset=static_offset,
+            static_offset=static_offset_dev,
         )
         self.update_mesh_properties(verts, verts_cano)
 
@@ -147,19 +159,31 @@ class FlameGaussianModel(GaussianModel):
         # print("debug flame_param keys:", flame_param.keys())
         # for keys in flame_param.keys():
         #     print(f"debug flame_param[{keys}].shape:", flame_param[keys].shape)
+        # Select only the slices we need and move them to the FLAME model device.
+        device = next(self.flame_model.parameters()).device
+        shape_dev = flame_param['shape'][None, ...].to(device)
+        expr_dev = flame_param['expr'][[timestep]].to(device)
+        rot_dev = flame_param['rotation'][[timestep]].to(device)
+        neck_dev = flame_param['neck_pose'][[timestep]].to(device)
+        jaw_dev = flame_param['jaw_pose'][[timestep]].to(device)
+        eyes_dev = flame_param['eyes_pose'][[timestep]].to(device)
+        trans_dev = flame_param['translation'][[timestep]].to(device)
+        static_offset_dev = flame_param['static_offset'].to(device) if 'static_offset' in flame_param and flame_param['static_offset'] is not None else None
+        dynamic_offset_dev = flame_param['dynamic_offset'][[timestep]].to(device) if 'dynamic_offset' in flame_param else None
+
         verts, verts_cano = self.flame_model(
-            flame_param['shape'][None, ...],
-            flame_param['expr'][[timestep]],
-            flame_param['rotation'][[timestep]],
-            flame_param['neck_pose'][[timestep]],
-            flame_param['jaw_pose'][[timestep]],
-            flame_param['eyes_pose'][[timestep]],
-            flame_param['translation'][[timestep]],
+            shape_dev,
+            expr_dev,
+            rot_dev,
+            neck_dev,
+            jaw_dev,
+            eyes_dev,
+            trans_dev,
             zero_centered_at_root_node=False,
             return_landmarks=False,
             return_verts_cano=True,
-            static_offset=flame_param['static_offset'],
-            dynamic_offset=flame_param['dynamic_offset'][[timestep]],
+            static_offset=static_offset_dev,
+            dynamic_offset=dynamic_offset_dev,
         )
         self.update_mesh_properties(verts, verts_cano)
     
@@ -281,7 +305,8 @@ class FlameGaussianModel(GaussianModel):
             # This operation overwrites the FLAME parameters loaded from the dataset.
             npz_path = Path(path).parent / "flame_param.npz"
             flame_param = np.load(str(npz_path))
-            flame_param = {k: torch.from_numpy(v).cuda() for k, v in flame_param.items()}
+            # Keep on CPU for now; training_setup will move to device.
+            flame_param = {k: torch.from_numpy(v) for k, v in flame_param.items()}
 
             self.flame_param = flame_param
             self.num_timesteps = self.flame_param['expr'].shape[0]  # required by viewers
@@ -290,7 +315,8 @@ class FlameGaussianModel(GaussianModel):
             # When there is a motion sequence specified, load only dynamic parameters.
             motion_path = Path(kwargs['motion_path'])
             flame_param = np.load(str(motion_path))
-            flame_param = {k: torch.from_numpy(v).cuda() for k, v in flame_param.items() if v.dtype == np.float32}
+            # Keep on CPU for now; training_setup will move to device.
+            flame_param = {k: torch.from_numpy(v) for k, v in flame_param.items() if v.dtype == np.float32}
 
             self.flame_param = {
                 # keep the static parameters

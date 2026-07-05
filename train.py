@@ -38,7 +38,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr, error_map
 from lpipsPyTorch import lpips
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 
 from PIL import Image
 import numpy as np
@@ -57,6 +57,113 @@ def save_image_debug(image, dir, iteration):
     image = (image * 255).clamp(0, 255).byte()
     image = image.permute(1, 2, 0).cpu().numpy()
     Image.fromarray(image).save(os.path.join(dir, f"iter_{iteration}.jpg"))
+
+
+def _configure_densification_schedule(opt):
+    total_iterations = max(1, int(opt.iterations))
+    max_valid_iter = max(1, total_iterations - 1)
+
+    densification_interval = max(1, int(opt.densification_interval))
+    opacity_reset_interval = max(1, int(opt.opacity_reset_interval))
+
+    densify_from_iter = int(opt.densify_from_iter)
+    densify_until_iter = int(opt.densify_until_iter)
+
+    densify_from_iter = min(max(0, densify_from_iter), max_valid_iter - 1)
+    if densify_until_iter <= densify_from_iter:
+        fallback_until = min(max_valid_iter, max(densify_from_iter + densification_interval, int(total_iterations * 0.6)))
+        print(f"[WARN] Invalid densify window ({densify_from_iter} -> {densify_until_iter}); auto-adjusted until_iter to {fallback_until}.")
+        densify_until_iter = fallback_until
+    densify_until_iter = min(max_valid_iter, max(densify_from_iter + 1, densify_until_iter))
+
+    if getattr(opt, "use_shortersplatting", False) and bool(getattr(opt, "shorter_auto_tune_schedule", False)):
+        densification_interval = min(densification_interval, 100)
+        densify_from_iter = min(densify_from_iter, min(1_000, max_valid_iter - 1))
+
+        tuned_until_floor = min(max_valid_iter, max(25_000, total_iterations - 1_000))
+        densify_until_iter = max(densify_until_iter, tuned_until_floor)
+        densify_until_iter = min(max_valid_iter, max(densify_from_iter + 1, densify_until_iter))
+
+        if opacity_reset_interval > densify_until_iter:
+            opacity_reset_interval = max(densification_interval, densify_until_iter // 5)
+
+        print(
+            "[INFO] ShorterSplat densify schedule "
+            f"from={densify_from_iter}, until={densify_until_iter}, "
+            f"interval={densification_interval}, opacity_reset={opacity_reset_interval}."
+        )
+    elif getattr(opt, "use_shortersplatting", False):
+        print(
+            "[INFO] ShorterSplat schedule auto-tune disabled; using provided schedule "
+            f"from={densify_from_iter}, until={densify_until_iter}, "
+            f"interval={densification_interval}, opacity_reset={opacity_reset_interval}."
+        )
+
+    return densify_from_iter, densify_until_iter, densification_interval, opacity_reset_interval
+
+
+def _compute_shorter_entropy_weight(
+    iteration: int,
+    total_iterations: int,
+    base_weight: float,
+    opacity_reset_interval: int,
+    scale_reset_factor: float,
+) -> float:
+    if base_weight <= 0.0:
+        return 0.0
+
+    progress = float(iteration) / float(max(1, total_iterations))
+    if progress < 0.20:
+        scheduled_weight = 0.0
+    elif progress < 0.60:
+        scheduled_weight = base_weight * 0.5
+    elif progress < 0.90:
+        scheduled_weight = base_weight
+    else:
+        scheduled_weight = base_weight * 2.0
+
+    if scheduled_weight <= 0.0:
+        return 0.0
+
+    # Pulse entropy in short bursts right after each opacity-reset period.
+    period = max(1, int(opacity_reset_interval))
+    pulse_window = max(1, period // 8)
+    pulse_idx = (iteration % period) // pulse_window
+    if pulse_idx % 2 == 0:
+        return 0.0
+
+    if scale_reset_factor > 0.0 and ((iteration // period) % 2 == 0):
+        scheduled_weight *= 0.5
+
+    return scheduled_weight
+
+
+def _compute_shorter_scale_reset_factor(
+    iteration: int,
+    total_iterations: int,
+    opacity_reset_interval: int,
+    base_reset_factor: float,
+    densify_until_iter: int,
+) -> float:
+    if base_reset_factor <= 0.0:
+        return 0.0
+
+    until_iter = min(int(total_iterations * 0.9), max(1, int(densify_until_iter) - 1))
+    if iteration <= 0 or iteration >= until_iter:
+        return 0.0
+
+    reset_interval = max(1, int(opacity_reset_interval) * 2)
+    if iteration % reset_interval != 0:
+        return 0.0
+
+    period_idx = iteration // max(1, int(opacity_reset_interval))
+    if period_idx <= 2:
+        return 0.0
+
+    reset_factor = min(1.0, float(base_reset_factor))
+    if 3 <= period_idx <= 4:
+        reset_factor = min(1.0, reset_factor + 0.1)
+    return reset_factor
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
@@ -82,6 +189,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     use_fastgs = bool(opt.use_fastgs and FASTGS_AVAILABLE)
     use_fused_ssim = bool(use_fastgs and FUSED_SSIM_AVAILABLE)
     fastgs_filter_interval = max(1, int(getattr(opt, "fastgs_filter_interval", 1)))
+    fastgs_use_contributing_filter = bool(use_fastgs and getattr(opt, "fastgs_use_contributing_filter", False))
+    use_shortersplatting = bool(getattr(opt, "use_shortersplatting", False))
+    lambda_entropy = max(0.0, float(getattr(opt, "lambda_entropy", 0.0)))
+    scale_reset_factor = max(0.0, float(getattr(opt, "scale_reset_factor", 0.0)))
+    shorter_scale_prune_quantile = float(getattr(opt, "shorter_scale_prune_quantile", 0.99))
+    shorter_scale_prune_factor = float(getattr(opt, "shorter_scale_prune_factor", 10.0))
+    shorter_prune_max_fraction = float(getattr(opt, "shorter_prune_max_fraction", 0.05))
+    shorter_clone_invisible_points = bool(getattr(opt, "shorter_clone_invisible_points", False))
+
+    densify_from_iter, densify_until_iter, densification_interval, opacity_reset_interval = _configure_densification_schedule(opt)
 
     if opt.use_fastgs and not FASTGS_AVAILABLE:
         print("[WARN] --use_fastgs requested, but FastGS extension is unavailable. Falling back to vanilla rasterizer.")
@@ -93,8 +210,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     elif use_fastgs and not FUSED_SSIM_AVAILABLE:
         print("[WARN] fused_ssim is unavailable. Falling back to standard SSIM.")
 
+    if use_shortersplatting:
+        print("[INFO] ShorterSplatting mode enabled.")
+        if lambda_entropy > 0.0:
+            print(f"[INFO] Entropy regularization enabled (lambda_entropy={lambda_entropy}).")
+        if scale_reset_factor > 0.0:
+            print(f"[INFO] Scale reset enabled (scale_reset_factor={scale_reset_factor}).")
+
     if use_fastgs and fastgs_filter_interval > 1:
         print(f"[INFO] FastGS filter render interval: every {fastgs_filter_interval} iterations.")
+
+    if fastgs_use_contributing_filter:
+        print("[INFO] FastGS contributing-point filter enabled for densify/prune stats.")
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -177,10 +304,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
         if use_fastgs:
-            render_pkg = render_fastgs(viewpoint_cam, gaussians, pipe, background, backface_culling=opt.bcull, mult=opt.mult)
+            render_pkg = render_fastgs(
+                viewpoint_cam,
+                gaussians,
+                pipe,
+                background,
+                backface_culling=opt.bcull,
+                mult=opt.mult,
+                get_flag=fastgs_use_contributing_filter,
+            )
         else:
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, backface_culling=opt.bcull)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        densify_visibility_filter = visibility_filter
+        if fastgs_use_contributing_filter:
+            densify_visibility_filter = render_pkg.get("rendering_filter", visibility_filter)
+            if int(densify_visibility_filter.sum().item()) == 0:
+                densify_visibility_filter = visibility_filter
         ####
         
         # Loss
@@ -251,6 +391,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             losses['ssim'] = (1.0 - ssim(image, gt_image)) * opt.lambda_dssim
 
+        if use_shortersplatting:
+            entropy_weight = _compute_shorter_entropy_weight(
+                iteration,
+                opt.iterations,
+                lambda_entropy,
+                opacity_reset_interval,
+                scale_reset_factor,
+            )
+            if entropy_weight > 0.0:
+                opacity_values = gaussians.get_opacity
+                if visibility_filter is not None and int(visibility_filter.sum().item()) > 0:
+                    opacity_values = opacity_values[visibility_filter]
+                opacity_values = opacity_values.clamp(1e-6, 1.0 - 1e-6)
+                entropy_term = -(
+                    opacity_values * torch.log(opacity_values)
+                    + (1.0 - opacity_values) * torch.log(1.0 - opacity_values)
+                )
+                losses['entropy'] = entropy_term.mean() * entropy_weight
+
 
         if opt.train_texture and iteration >= opt.texture_start_iter:
             gt_texture = gaussians.flame_model.input_texture.cuda()
@@ -266,17 +425,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         if gaussians.binding != None:
             if opt.metric_xyz:
-                losses['xyz'] = F.relu((gaussians._xyz*gaussians.face_scaling[gaussians.binding])[visibility_filter] - opt.threshold_xyz).norm(dim=1).mean() * opt.lambda_xyz
+                losses['xyz'] = F.relu((gaussians._xyz*gaussians.face_scaling[gaussians.binding])[densify_visibility_filter] - opt.threshold_xyz).norm(dim=1).mean() * opt.lambda_xyz
             else:
                 # losses['xyz'] = gaussians._xyz.norm(dim=1).mean() * opt.lambda_xyz
-                losses['xyz'] = F.relu(gaussians._xyz[visibility_filter].norm(dim=1) - opt.threshold_xyz).mean() * opt.lambda_xyz
+                losses['xyz'] = F.relu(gaussians._xyz[densify_visibility_filter].norm(dim=1) - opt.threshold_xyz).mean() * opt.lambda_xyz
 
             if opt.lambda_scale != 0:
                 if opt.metric_scale:
-                    losses['scale'] = F.relu(gaussians.get_scaling[visibility_filter] - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
+                    losses['scale'] = F.relu(gaussians.get_scaling[densify_visibility_filter] - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
                 else:
                     # losses['scale'] = F.relu(gaussians._scaling).norm(dim=1).mean() * opt.lambda_scale
-                    losses['scale'] = F.relu(torch.exp(gaussians._scaling[visibility_filter]) - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
+                    losses['scale'] = F.relu(torch.exp(gaussians._scaling[densify_visibility_filter]) - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
 
             if opt.lambda_dynamic_offset != 0:
                 losses['dy_off'] = gaussians.compute_dynamic_offset_loss() * opt.lambda_dynamic_offset
@@ -308,6 +467,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 postfix["opac"] = f"{gaussians.get_opacity.mean().item():.{7}f}"
                 if 'filter' in losses:
                     postfix["filter"] = f"{losses['filter']:.{7}f}"
+                if 'entropy' in losses:
+                    postfix["entropy"] = f"{losses['entropy']:.{7}f}"
                 # ------------------------
                 if 'xyz' in losses:
                     postfix["xyz"] = f"{losses['xyz']:.{7}f}"
@@ -332,19 +493,44 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration,opt=opt)
             
             # Densification
-            if iteration < opt.densify_until_iter:
+            if iteration < densify_until_iter:
                 # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.max_radii2D[densify_visibility_filter] = torch.max(
+                    gaussians.max_radii2D[densify_visibility_filter],
+                    radii[densify_visibility_filter],
+                )
+                gaussians.add_densification_stats(viewspace_point_tensor, densify_visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                if iteration > densify_from_iter and iteration % densification_interval == 0:
+                    size_threshold = 20 if iteration > opacity_reset_interval else None
 
                     # LM3D : adjust opacity threshold
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.001, scene.cameras_extent, size_threshold)
+                    if use_shortersplatting:
+                        densify_span = max(1, densify_until_iter - densify_from_iter)
+                        densify_progress = max(0.0, min(1.0, (iteration - densify_from_iter) / densify_span))
+                        # Mesh-bound avatars are sensitive to over-pruning near end of densify.
+                        if dataset.bind_to_mesh:
+                            min_opacity = min(0.02, 0.003 + 0.017 * densify_progress)
+                        else:
+                            min_opacity = min(0.05, 0.005 + 0.04 * densify_progress)
+                    else:
+                        min_opacity = 0.001
+
+                    gaussians.densify_and_prune(
+                        opt.densify_grad_threshold,
+                        min_opacity,
+                        scene.cameras_extent,
+                        size_threshold,
+                        visibility_filter=densify_visibility_filter,
+                        use_shortersplatting=use_shortersplatting,
+                        scale_prune_quantile=shorter_scale_prune_quantile,
+                        scale_prune_factor=shorter_scale_prune_factor,
+                        prune_max_fraction=shorter_prune_max_fraction,
+                        clone_invisible_points=shorter_clone_invisible_points,
+                    )
 
 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                if iteration % opacity_reset_interval == 0 or (dataset.white_background and iteration == densify_from_iter):
                     gaussians.reset_opacity()
                     ###
 
@@ -352,6 +538,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
+
+            if use_shortersplatting:
+                reset_factor = _compute_shorter_scale_reset_factor(
+                    iteration,
+                    opt.iterations,
+                    opacity_reset_interval,
+                    scale_reset_factor,
+                    densify_until_iter,
+                )
+                if reset_factor > 0.0:
+                    gaussians.reset_scaling(reset_factor)
+                    strategy_name = "with_entropy" if lambda_entropy > 0.0 else "default"
+                    print(
+                        f"[ITER {iteration}] Shorter scale reset applied "
+                        f"(factor={reset_factor:.3f}, strategy={strategy_name})."
+                    )
 
             gaussians.clamp_scaling(max_scaling=opt.max_scaling)  # LM3D : clamp scaling to 0.5
 
@@ -386,6 +588,8 @@ def training_report(tb_writer, iteration, losses, elapsed, testing_iterations, s
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', losses['l1'].item(), iteration)
         tb_writer.add_scalar('train_loss_patches/ssim_loss', losses['ssim'].item(), iteration)
+        if 'entropy' in losses:
+            tb_writer.add_scalar('train_loss_patches/entropy_loss', losses['entropy'].item(), iteration)
         if 'xyz' in losses:
             tb_writer.add_scalar('train_loss_patches/xyz_loss', losses['xyz'].item(), iteration)
         if 'scale' in losses:
@@ -504,7 +708,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    args = parser.parse_args(sys.argv[1:])
+    args = get_combined_args(parser)
     if args.interval > op.iterations:
         args.interval = op.iterations // 5
     if len(args.test_iterations) == 0:
