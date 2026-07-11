@@ -106,6 +106,7 @@ def render_set(dataset : ModelParams, name, iteration, views, gaussians, pipelin
         print(e)
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_val : bool, skip_test : bool, render_mesh: bool, use_fastgs: bool = False, mult: float = 0.5):
+    # print("debug point path:",dataset.source_path)
     with torch.no_grad():
         render_scale = getattr(dataset, "scale_res", 1.0)
         if dataset.bind_to_mesh:

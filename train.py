@@ -272,8 +272,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             save_image_debug(gt_image, os.path.join(dataset.model_path, "gt_image"), iteration)
             save_image_debug(image, os.path.join(dataset.model_path, "rendered"), iteration)
             save_image_debug(log_image, os.path.join(dataset.model_path, "rendered_whole"), iteration)
-            # save_image_debug(mesh_render, os.path.join(dataset.model_path, "mesh"), iteration)
-            # save_image_debug(alpha_mesh, os.path.join(dataset.model_path, "mesh_alpha"), iteration)
+            save_image_debug(mesh_render, os.path.join(dataset.model_path, "mesh"), iteration)
+            save_image_debug(alpha_mesh, os.path.join(dataset.model_path, "mesh_alpha"), iteration)
             save_image_debug(mesh_image_diff, os.path.join(dataset.model_path, "mesh_image_diff"), iteration)
             save_image_debug(filter_diff, os.path.join(dataset.model_path, "filter_diff"), iteration)
             if outline_image is not None: save_image_debug(outline_image, os.path.join(dataset.model_path, "outline_image"), iteration)
@@ -335,6 +335,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 losses['lap'] = gaussians.compute_laplacian_loss() * opt.lambda_laplacian
         
         losses['total'] = sum([v for k, v in losses.items()])
+
         losses['total'].backward()
 
         iter_end.record()
@@ -389,6 +390,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
                     ##
+
+            # LM3D: disable invisible point clouds
+            invisible_filter = ~visibility_filter
+
+            for group in gaussians.optimizer.param_groups:
+                for param in group['params']:
+                    if param.grad is not None and param.shape[0] == invisible_filter.shape[0]:
+                        param.grad[invisible_filter] = 0.0
+                        
+                        state = gaussians.optimizer.state[param]
+                        if len(state) > 0: 
+                            # Zero out the first moment (momentum)
+                            state['exp_avg'][invisible_filter] = 0.0
 
             # Optimizer step
             if iteration < opt.iterations:

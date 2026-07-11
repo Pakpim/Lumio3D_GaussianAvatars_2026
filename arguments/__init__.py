@@ -50,7 +50,7 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
-        self.sh_degree = 0
+        self.sh_degree = 3
         self._source_path = ""  # Path to the source data set
         self._target_path = ""  # Path to the target data set for pose and expression transfer
         self._model_path = ""  # Path to the folder to save trained models
@@ -66,12 +66,12 @@ class ModelParams(ParamGroup):
         self.select_camera_id = -1
 
         self.coord = "bary"  # normal, bary = barycentric
-        self.ply_path = None # Path to initial ply file for training
+        self.ply_path = "" # Path to initial ply file for training
         # self.ply_path = " /rpool/data/pim/GA_out/bird_new_v01_test08/point_cloud/iteration_10000/point_cloud_bary.ply" # Path to initial ply file for training
         self.texture_path = ""  # Path to the texture file
 
-        self.omit_camera_id = [12,14,15] # List of camera IDs to omit from training
-        self.scale_res = 0.6
+        self.omit_camera_id = [] # List of camera IDs to omit from training
+        self.scale_res = 1
 
 
         super().__init__(parser, "Loading Parameters", sentinel)
@@ -86,7 +86,7 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
-        self.interval_media = 1
+        self.interval_media = 100
         self.load_from_iter = 5000
         super().__init__(parser, "Pipeline Parameters")
 
@@ -132,7 +132,7 @@ class OptimizationParams(ParamGroup):
         self.texture_lr = 0.0025
         self.texture_lambda = 0.1
 
-        self.initial_pc_size = 0.04 # 0.04 (original)
+        self.initial_pc_size = 0.02 # 0.04 (original)
         self.initial_pc_number = 150 # 200
         self.initial_pc_number_eye = 50 # 100
         
@@ -149,7 +149,7 @@ class OptimizationParams(ParamGroup):
             self.texture_start_iter = 0
 
         # Lumio Optims
-        self.lambda_filter = 2
+        self.lambda_filter = 10.0
         self.lambda_opacity = 2e-5
         self.bcull = False
         self.depth = False

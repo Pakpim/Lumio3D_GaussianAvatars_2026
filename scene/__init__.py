@@ -178,11 +178,11 @@ class Scene:
                 os.path.join(self.model_path,
                             "point_cloud",
                             "iteration_" + str(self.loaded_iter),
-                            "point_cloud.ply"),
+                            "point_cloud_bary.ply"),
                 has_target=args.target_path != "",
             )
         else:
-            if ply_path is not None: # LM3D : load from ply
+            if ply_path is not "": # LM3D : load from ply
                 print("Loading point cloud from provided ply file: {}".format(ply_path))
                 self.gaussians.load_ply(ply_path, has_target=args.target_path != "")
             else:

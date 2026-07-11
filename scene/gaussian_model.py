@@ -116,7 +116,7 @@ class GaussianModel:
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+        # self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_scaling(self):
@@ -158,6 +158,7 @@ class GaussianModel:
             if self.face_center is None:
                 self.select_mesh_by_timestep(0)
             
+            # print("debug current coord:", self.coord)
             if self.coord == "bary":
                 verts = self.verts # (B, V, 3)
                 faces = self.flame_model.faces.int() # (F, 3)
@@ -527,6 +528,8 @@ class GaussianModel:
         features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
         features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
 
+        print("debug load ply shape", xyz.shape)
+
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
         assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
@@ -589,9 +592,10 @@ class GaussianModel:
         #     self.union_ply(eye_plydata, 'eyes')
 
         ####
-        # self.xyz_gradient_accum = torch.zeros((self._xyz.shape[0], 1), device="cuda")
-        # self.denom = torch.zeros((self._xyz.shape[0], 1), device="cuda")
-        # self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((self._xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self._xyz.shape[0], 1), device="cuda")
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        ## turn off previous color
         # num_pts = self._xyz.shape[0]
         # fused_color = torch.tensor(np.random.random((num_pts, 3)) / 255.0).float().cuda()
         # features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -599,7 +603,7 @@ class GaussianModel:
         # features[:, 3:, 1:] = 0.0
         # self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         # self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
-        # print("ply loaded!")
+        print("ply loaded!")
 
         # print("debug train", 'is_training' in kwargs and kwargs['is_training'] is True)
         # if 'is_training' in kwargs and kwargs['is_training'] is True:

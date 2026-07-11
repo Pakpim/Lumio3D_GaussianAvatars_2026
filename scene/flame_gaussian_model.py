@@ -55,17 +55,38 @@ class FlameGaussianModel(GaussianModel):
             else:
                 n_init = 1
                 n_eye_init = 1
+
+            faces = self.flame_model.faces
+            verts = self.flame_model.v_template
+            # print("debug faces, verts", faces.shape, verts.shape)
+            triangles = verts[faces]
+            sides_a = triangles[:, 1, :] - triangles[:, 0, :]
+            sides_b = triangles[:, 1, :] - triangles[:, 2, :]
+            cross = torch.cross(sides_a, sides_b)
+            faces_area = torch.linalg.norm(cross, dim = 1)
+            faces_pc = torch.ceil(faces_area * 700 * 20000 + 150).to(dtype=torch.int32)
+            # print("debug triangle", triangles.shape, triangles[:2, ...])
+            # print("debug sides_a", sides_a.shape, sides_a[:2, ...])
+            # print("debug cross", cross.shape, cross[:2, ...])
+            # print("debug faces_area", faces_area.shape, faces_area[:2, ...])
+            # print("debug faces_pc", faces_pc.shape, faces_pc[:2, ...])
             eyelid = self.flame_model.mask.get_fid_by_region(['eye_region'])
             back_head = self.flame_model.mask.get_fid_by_region(['back_head_2'])
             face_filter = torch.ones(len(self.flame_model.faces), dtype = bool)
-            face_filter[back_head] = False
-            faces = torch.arange(len(self.flame_model.faces))[face_filter]
+            # face_filter[back_head] = False
+            faces = torch.arange(len(self.flame_model.faces))[face_filter].cuda()
             repeated_eyelid = torch.repeat_interleave(eyelid, n_eye_init).cuda()
-            self.binding = torch.repeat_interleave(faces, n_init).cuda()
-            self.binding = torch.cat((self.binding, repeated_eyelid), dim=0)
 
-            self.binding_counter = torch.ones(len(self.flame_model.faces), dtype=torch.int32).cuda() * n_init
-            self.binding_counter[eyelid] += n_eye_init
+            binding = torch.repeat_interleave(faces, faces_pc).cuda()
+            print("debug binding", binding.shape, binding[:10], torch.sum(faces_pc))
+
+            self.binding = binding
+            # self.binding = torch.repeat_interleave(faces, n_init).cuda()
+            # self.binding = torch.cat((self.binding, repeated_eyelid), dim=0)
+
+            self.binding_counter = faces_pc
+            # self.binding_counter = torch.ones(len(self.flame_model.faces), dtype=torch.int32).cuda() * n_init
+            # self.binding_counter[eyelid] += n_eye_init
 
     def load_meshes(self, train_meshes, test_meshes, tgt_train_meshes, tgt_test_meshes):
         if self.flame_param is None:
@@ -80,7 +101,7 @@ class FlameGaussianModel(GaussianModel):
             print("debug meshes", type(meshes), len(meshes),mesh_timesteps)
             if not self.disable_flame_static_offset:
                 static_offset = torch.from_numpy(meshes[mesh_timesteps[0]]['static_offset'])
-                if static_offset.shape[0] != num_verts:
+                if static_offset.shape[0] < num_verts:
                     static_offset = torch.nn.functional.pad(static_offset, (0, 0, 0, num_verts - meshes[mesh_timesteps[0]]['static_offset'].shape[1]))
             else:
                 static_offset = torch.zeros([num_verts, 3])
@@ -106,7 +127,9 @@ class FlameGaussianModel(GaussianModel):
                 self.flame_param['jaw_pose'][i] = torch.from_numpy(mesh['jaw_pose'])
                 self.flame_param['eyes_pose'][i] = torch.from_numpy(mesh['eyes_pose'])
                 self.flame_param['translation'][i] = torch.from_numpy(mesh['translation'])
-                # self.flame_param['dynamic_offset'][i] = torch.from_numpy(mesh['dynamic_offset'])
+                self.flame_param['dynamic_offset'][i] = torch.from_numpy(mesh['dynamic_offset'])
+            
+            # print("debug static_offset:", self.flame_param['static_offset'].shape ,self.flame_param['static_offset'])
             
             for k, v in self.flame_param.items():
                 self.flame_param[k] = v.float().cuda()
@@ -141,12 +164,14 @@ class FlameGaussianModel(GaussianModel):
             return_verts_cano=True,
             static_offset=static_offset,
         )
+        # print("debug verts", verts.shape, verts)
         self.update_mesh_properties(verts, verts_cano)
 
     def select_mesh_by_timestep(self, timestep, original=False):
         # timestep = 0
         self.timestep = timestep
         flame_param = self.flame_param_orig if original and self.flame_param_orig != None else self.flame_param
+        # print("debug flame param", self.flame_param_orig, self.flame_param)
         # print("debug flame_param keys:", flame_param.keys())
         # for keys in flame_param.keys():
         #     print(f"debug flame_param[{keys}].shape:", flame_param[keys].shape)
